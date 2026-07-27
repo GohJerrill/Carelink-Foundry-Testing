@@ -166,6 +166,10 @@ contract CareLinkCCNDay {
             revert CurrentCCNDayStillActive();
         }
 
+        if (_startDateTime <= block.timestamp) {
+            revert CCNDayStartTimeNotFuture();
+        }
+
         if (_endDateTime <= block.timestamp) {
             revert CCNDayEndTimeInPast();
         }

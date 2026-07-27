@@ -108,10 +108,6 @@ contract CareLinkUsers {
         return StaffWhiteListArray;
     }
 
-    // function GETSTAFFWALLETCOUNT() public view returns (uint256) {
-    //     return StaffWhiteListArray.length;
-    // }
-
     function RegisterAsStudent(
         string memory _username,
         School _school
@@ -187,10 +183,6 @@ contract CareLinkUsers {
         Users[msg.sender].usertype = UserType.Staff;
         Users[msg.sender].school = _school;
     }
-
-    // function IsMyWalletRegistered() public view returns (bool) {
-    //     return Users[msg.sender].IsRegistered;
-    // }
 
     function GetMyProfile() public view returns (UserProfile memory) {
         if (!Users[msg.sender].IsRegistered) {

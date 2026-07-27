@@ -183,6 +183,7 @@ error WalletNotRegistered();
 error NotStudentOrCustomer();
 
 error CurrentCCNDayStillActive();
+error CCNDayStartTimeNotFuture();
 error CCNDayEndTimeInPast();
 error NoCurrentCCNDay();
 error CurrentCCNDayDeleted();

@@ -167,6 +167,31 @@ contract CareLinkCCNDayTest is Test {
         return ccnDayContract.GetCurrentCCNDayID();
     }
 
+    function test_CreateNewCCNDayRevertsWhenStartTimeIsInPast() public {
+        School[] memory eligibleSchools = new School[](1);
+        eligibleSchools[0] = School.IIT;
+
+        uint256 ccnStartTime = block.timestamp - 1;
+        uint256 ccnEndTime = block.timestamp + 1 days;
+
+        uint256 registrationStartTime = block.timestamp - 3 days;
+        uint256 registrationEndTime = block.timestamp - 2 days;
+
+        vm.expectRevert(CCNDayStartTimeNotFuture.selector);
+
+        vm.prank(organiser);
+
+        ccnDayContract.CreateNewCCNDay(
+            "Past Start CCN Day",
+            "This CCN Day should not be created.",
+            ccnStartTime,
+            ccnEndTime,
+            registrationStartTime,
+            registrationEndTime,
+            eligibleSchools
+        );
+    }
+
     // ===============================================================
     // CONSTRUCTOR
     // ===============================================================
@@ -390,10 +415,10 @@ contract CareLinkCCNDayTest is Test {
         ccnDayContract.CreateNewCCNDay(
             "Invalid CCN Day",
             "The end time is not in the future",
-            BASE_TIME - 100,
+            BASE_TIME + 1 days,
             BASE_TIME,
-            BASE_TIME - 300,
-            BASE_TIME - 200,
+            BASE_TIME - 2 days,
+            BASE_TIME - 1 days,
             schools
         );
     }
@@ -642,6 +667,33 @@ contract CareLinkCCNDayTest is Test {
         vm.expectRevert(CCNDayDoesNotExist.selector);
 
         ccnDayContract.GetCCNDayEndTime(999);
+    }
+
+    function test_CreateNewCCNDayRevertsWhenStartTimeEqualsCurrentTime()
+        public
+    {
+        School[] memory eligibleSchools = new School[](1);
+        eligibleSchools[0] = School.IIT;
+
+        uint256 ccnStartTime = block.timestamp;
+        uint256 ccnEndTime = block.timestamp + 1 days;
+
+        uint256 registrationStartTime = block.timestamp - 2 days;
+        uint256 registrationEndTime = block.timestamp - 1 days;
+
+        vm.expectRevert(CCNDayStartTimeNotFuture.selector);
+
+        vm.prank(organiser);
+
+        ccnDayContract.CreateNewCCNDay(
+            "Current Start CCN Day",
+            "This CCN Day should not be created.",
+            ccnStartTime,
+            ccnEndTime,
+            registrationStartTime,
+            registrationEndTime,
+            eligibleSchools
+        );
     }
 
     // ===============================================================

@@ -1,0 +1,28 @@
+{
+  "name": "carelink-foundry-testing",
+  "version": "1.0.0",
+  "description": "**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**",
+  "main": "index.js",
+  "directories": {
+    "lib": "lib",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GohJerrill/Carelink-Foundry-Testing.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/GohJerrill/Carelink-Foundry-Testing/issues"
+  },
+  "homepage": "https://github.com/GohJerrill/Carelink-Foundry-Testing#readme",
+  "dependencies": {
+    "@pythnetwork/pyth-sdk-solidity": "^4.3.1"
+  }
+}

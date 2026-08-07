@@ -18,7 +18,19 @@ contract MockCareLinkStallsForCCNDay {
     uint256 public deleteCallCount;
     uint256 public lastDeletedCCNDayID;
 
+    bool public shouldRevert;
+
+    error MockDeleteStallsFailed();
+
+    function SetShouldRevert(bool _shouldRevert) external {
+        shouldRevert = _shouldRevert;
+    }
+
     function DeleteStallsByCCNDay(uint256 _ccnDayId) external {
+        if (shouldRevert) {
+            revert MockDeleteStallsFailed();
+        }
+
         deleteCallCount++;
         lastDeletedCCNDayID = _ccnDayId;
     }
@@ -30,6 +42,7 @@ contract CareLinkCCNDayTest is Test {
 
     address internal organiser;
     address internal nonOrganiser;
+    address internal replacementStallContract;
 
     /*
      * We use a fixed timestamp so every test is deterministic.
@@ -58,9 +71,30 @@ contract CareLinkCCNDayTest is Test {
 
         organiser = makeAddr("organiser");
         nonOrganiser = makeAddr("nonOrganiser");
+        replacementStallContract = makeAddr("replacementStallContract");
 
         ccnDayContract = new CareLinkCCNDay(organiser);
         mockStallContract = new MockCareLinkStallsForCCNDay();
+    }
+
+    function test_OrganiserCanUpdateStallContractAddress() public {
+        vm.startPrank(organiser);
+
+        ccnDayContract.SetStallContractAddress(address(mockStallContract));
+
+        assertEq(
+            address(ccnDayContract.stallContract()),
+            address(mockStallContract)
+        );
+
+        ccnDayContract.SetStallContractAddress(replacementStallContract);
+
+        vm.stopPrank();
+
+        assertEq(
+            address(ccnDayContract.stallContract()),
+            replacementStallContract
+        );
     }
 
     // ===============================================================
@@ -86,6 +120,32 @@ contract CareLinkCCNDayTest is Test {
 
         schools[0] = School.Design;
         schools[1] = School.Science;
+    }
+
+    function _assertCCNDay(
+        CCNDay memory ccnDay,
+        uint256 expectedID,
+        string memory expectedName,
+        string memory expectedDescription,
+        uint256 expectedStart,
+        uint256 expectedEnd,
+        uint256 expectedRegistrationStart,
+        uint256 expectedRegistrationEnd,
+        uint256 expectedCreatedAt,
+        address expectedCreatedBy
+    ) internal pure {
+        assertEq(ccnDay.CCNDayID, expectedID);
+        assertEq(ccnDay.CCNName, expectedName);
+        assertEq(ccnDay.CCNDescription, expectedDescription);
+        assertEq(ccnDay.StartDateTime, expectedStart);
+        assertEq(ccnDay.EndDateTime, expectedEnd);
+        assertEq(
+            ccnDay.StallRegistrationStartDateTime,
+            expectedRegistrationStart
+        );
+        assertEq(ccnDay.StallRegistrationEndDateTime, expectedRegistrationEnd);
+        assertEq(ccnDay.CreatedAt, expectedCreatedAt);
+        assertEq(ccnDay.CreatedBy, expectedCreatedBy);
     }
 
     /*
@@ -165,31 +225,6 @@ contract CareLinkCCNDayTest is Test {
         );
 
         return ccnDayContract.GetCurrentCCNDayID();
-    }
-
-    function test_CreateNewCCNDayRevertsWhenStartTimeIsInPast() public {
-        School[] memory eligibleSchools = new School[](1);
-        eligibleSchools[0] = School.IIT;
-
-        uint256 ccnStartTime = block.timestamp - 1;
-        uint256 ccnEndTime = block.timestamp + 1 days;
-
-        uint256 registrationStartTime = block.timestamp - 3 days;
-        uint256 registrationEndTime = block.timestamp - 2 days;
-
-        vm.expectRevert(CCNDayStartTimeNotFuture.selector);
-
-        vm.prank(organiser);
-
-        ccnDayContract.CreateNewCCNDay(
-            "Past Start CCN Day",
-            "This CCN Day should not be created.",
-            ccnStartTime,
-            ccnEndTime,
-            registrationStartTime,
-            registrationEndTime,
-            eligibleSchools
-        );
     }
 
     // ===============================================================
@@ -515,6 +550,30 @@ contract CareLinkCCNDayTest is Test {
         );
     }
 
+    function test_CreateNewCCNDayAllowsRegistrationToEndExactlyAtCCNStart()
+        public
+    {
+        School[] memory schools = _defaultSchools();
+
+        vm.prank(organiser);
+
+        ccnDayContract.CreateNewCCNDay(
+            "Boundary CCN Day",
+            "Registration closes exactly when CCN Day starts",
+            CCN_START,
+            CCN_END,
+            REGISTRATION_START,
+            CCN_START,
+            schools
+        );
+
+        CCNDay memory createdCCNDay = ccnDayContract.GetCurrentCCNDay();
+
+        assertEq(createdCCNDay.StallRegistrationEndDateTime, CCN_START);
+
+        assertEq(createdCCNDay.StartDateTime, CCN_START);
+    }
+
     function test_CreateNewCCNDayRevertsForEmptyEligibleSchools() public {
         School[] memory schools = new School[](0);
 
@@ -575,6 +634,33 @@ contract CareLinkCCNDayTest is Test {
         );
     }
 
+    function test_FailedCCNDayCreationDoesNotConsumeID() public {
+        School[] memory invalidSchools = new School[](0);
+
+        vm.expectRevert(EmptyEligibleSchools.selector);
+
+        vm.prank(organiser);
+
+        ccnDayContract.CreateNewCCNDay(
+            "Failed CCN Day",
+            "This creation should revert",
+            CCN_START,
+            CCN_END,
+            REGISTRATION_START,
+            REGISTRATION_END,
+            invalidSchools
+        );
+
+        assertEq(ccnDayContract.GetCurrentCCNDayID(), 0);
+        assertFalse(ccnDayContract.DoesCCNDayExist(1));
+
+        _createDefaultCCNDay();
+
+        CCNDay memory createdCCNDay = ccnDayContract.GetCurrentCCNDay();
+
+        assertEq(createdCCNDay.CCNDayID, 1);
+    }
+
     // ===============================================================
     // ACTIVE STATUS AND TIME BOUNDARIES
     // ===============================================================
@@ -595,6 +681,21 @@ contract CareLinkCCNDayTest is Test {
         vm.warp(CCN_END + 1);
 
         assertFalse(ccnDayContract.IsCurrentCCNDayActive());
+    }
+
+    function test_EndedCCNDayRemainsCurrentUntilReplacedOrDeleted() public {
+        _createDefaultCCNDay();
+
+        vm.warp(CCN_END + 1);
+
+        assertFalse(ccnDayContract.IsCurrentCCNDayActive());
+
+        assertEq(ccnDayContract.GetCurrentCCNDayID(), 1);
+
+        CCNDay memory endedCCNDay = ccnDayContract.GetCurrentCCNDay();
+
+        assertEq(endedCCNDay.CCNDayID, 1);
+        assertEq(endedCCNDay.CCNName, "CareLink CCN Day");
     }
 
     function test_StallRegistrationOpenAtInclusiveBoundaries() public {
@@ -663,10 +764,39 @@ contract CareLinkCCNDayTest is Test {
         ccnDayContract.GetCCNDayStartTime(999);
     }
 
+    function test_IsSchoolEligibleForUnknownCCNDayReturnsFalse() public view {
+        assertFalse(ccnDayContract.IsSchoolEligibleForCCNDay(999, School.IIT));
+    }
+
     function test_GetEndTimeRevertsForUnknownID() public {
         vm.expectRevert(CCNDayDoesNotExist.selector);
 
         ccnDayContract.GetCCNDayEndTime(999);
+    }
+
+    function test_CreateNewCCNDayRevertsWhenStartTimeIsInPast() public {
+        School[] memory eligibleSchools = new School[](1);
+        eligibleSchools[0] = School.IIT;
+
+        uint256 ccnStartTime = block.timestamp - 1;
+        uint256 ccnEndTime = block.timestamp + 1 days;
+
+        uint256 registrationStartTime = block.timestamp - 3 days;
+        uint256 registrationEndTime = block.timestamp - 2 days;
+
+        vm.expectRevert(CCNDayStartTimeNotFuture.selector);
+
+        vm.prank(organiser);
+
+        ccnDayContract.CreateNewCCNDay(
+            "Past Start CCN Day",
+            "This CCN Day should not be created.",
+            ccnStartTime,
+            ccnEndTime,
+            registrationStartTime,
+            registrationEndTime,
+            eligibleSchools
+        );
     }
 
     function test_CreateNewCCNDayRevertsWhenStartTimeEqualsCurrentTime()
@@ -779,6 +909,10 @@ contract CareLinkCCNDayTest is Test {
             ccnDayContract.IsSchoolEligibleForCCNDay(1, School.Business)
         );
 
+        assertFalse(
+            ccnDayContract.IsSchoolEligibleForCCNDay(1, School.Engineering)
+        );
+
         /*
          * New school eligibility must be stored.
          */
@@ -791,6 +925,10 @@ contract CareLinkCCNDayTest is Test {
         );
 
         assertEq(storedSchools.length, 2);
+
+        assertEq(uint256(storedSchools[0]), uint256(School.Design));
+
+        assertEq(uint256(storedSchools[1]), uint256(School.Science));
     }
 
     function test_EditCCNDayRevertsForNonOrganiser() public {
@@ -903,6 +1041,55 @@ contract CareLinkCCNDayTest is Test {
         );
     }
 
+    function test_InvalidEditDoesNotModifyExistingCCNDay() public {
+        _createDefaultCCNDay();
+
+        School[] memory duplicateSchools = new School[](2);
+
+        duplicateSchools[0] = School.Design;
+        duplicateSchools[1] = School.Design;
+
+        vm.expectRevert(DuplicateEligibleSchools.selector);
+
+        vm.prank(organiser);
+
+        ccnDayContract.EditCCNDay(
+            1,
+            "Invalid Updated Name",
+            "This edit should completely revert",
+            BASE_TIME + 4 days,
+            BASE_TIME + 5 days,
+            BASE_TIME + 2 days,
+            BASE_TIME + 3 days,
+            duplicateSchools
+        );
+
+        CCNDay memory unchangedCCNDay = ccnDayContract.GetCCNDayByID(1);
+
+        _assertCCNDay(
+            unchangedCCNDay,
+            1,
+            "CareLink CCN Day",
+            "Temasek Polytechnic CCN Day event",
+            CCN_START,
+            CCN_END,
+            REGISTRATION_START,
+            REGISTRATION_END,
+            BASE_TIME,
+            organiser
+        );
+
+        assertTrue(ccnDayContract.IsSchoolEligibleForCCNDay(1, School.IIT));
+
+        assertTrue(
+            ccnDayContract.IsSchoolEligibleForCCNDay(1, School.Business)
+        );
+
+        assertTrue(
+            ccnDayContract.IsSchoolEligibleForCCNDay(1, School.Engineering)
+        );
+    }
+
     // ===============================================================
     // DELETE CCN DAY
     // ===============================================================
@@ -913,6 +1100,14 @@ contract CareLinkCCNDayTest is Test {
         vm.prank(organiser);
 
         ccnDayContract.SetStallContractAddress(address(mockStallContract));
+
+        vm.expectCall(
+            address(mockStallContract),
+            abi.encodeCall(
+                MockCareLinkStallsForCCNDay.DeleteStallsByCCNDay,
+                (1)
+            )
+        );
 
         vm.prank(organiser);
 
@@ -992,6 +1187,41 @@ contract CareLinkCCNDayTest is Test {
         School[] memory schools = ccnDayContract.GetCCNDayEligibleSchools(1);
 
         assertEq(schools.length, 3);
+    }
+
+    function test_DeleteCCNDayRollsBackWhenStallDeletionFails() public {
+        _createDefaultCCNDay();
+
+        mockStallContract.SetShouldRevert(true);
+
+        vm.prank(organiser);
+
+        ccnDayContract.SetStallContractAddress(address(mockStallContract));
+
+        vm.expectRevert(
+            MockCareLinkStallsForCCNDay.MockDeleteStallsFailed.selector
+        );
+
+        vm.prank(organiser);
+
+        ccnDayContract.DeleteCCNDay(1);
+
+        // CCN Day still exists.
+        assertTrue(ccnDayContract.DoesCCNDayExist(1));
+
+        // It is still the current CCN Day.
+        assertEq(ccnDayContract.GetCurrentCCNDayID(), 1);
+
+        // Eligible schools are restored because the
+        // entire transaction reverted.
+        assertTrue(ccnDayContract.IsSchoolEligibleForCCNDay(1, School.IIT));
+
+        School[] memory schools = ccnDayContract.GetCCNDayEligibleSchools(1);
+
+        assertEq(schools.length, 3);
+
+        // Mock state also rolled back.
+        assertEq(mockStallContract.deleteCallCount(), 0);
     }
 
     function test_GetAllCCNDaysSkipsDeletedDays() public {

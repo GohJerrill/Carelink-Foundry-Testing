@@ -2,6 +2,8 @@
 pragma solidity ^0.8.20;
 
 import "./CareLinkTypes.sol";
+import "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
+import "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
 
 interface AggregatorV3Interface {
     function decimals() external view returns (uint8);
@@ -39,17 +41,6 @@ interface ICareLinkStallsForPayments {
 
     function IsStallOpen(uint256 _stallId) external view returns (bool);
 
-    function GetProductPaymentDetails(
-        uint256 _productId
-    )
-        external
-        view
-        returns (
-            uint256 stallId,
-            uint256 productPriceSGDCents,
-            ProductStatus productStatus
-        );
-
     function IsWalletApprovedStallOwner(
         address _wallet
     ) external view returns (bool);
@@ -58,7 +49,7 @@ interface ICareLinkStallsForPayments {
         uint256 _stallId
     ) external view returns (bool);
 
-    function GetWalletStallID(address _wallet) external view returns (uint256);
+    // function GetWalletStallID(address _wallet) external view returns (uint256);
 
     function GetWalletActiveOrUnresolvedStallID(
         address _wallet
@@ -68,14 +59,6 @@ interface ICareLinkStallsForPayments {
 }
 
 contract CareLinkPayments {
-    error CCNDayPaymentNotStarted();
-    error CCNDayPaymentEnded();
-    error StallHasWithdrawablePayments();
-    error InvalidOraclePrice();
-    error StaleOraclePrice();
-    error ProductNotAvailable();
-    error IncorrectPaymentAmount(uint256 RequiredWei, uint256 SentWei);
-
     address public Organiser;
 
     ICareLinkUsersForPayments public userContract;
@@ -84,12 +67,17 @@ contract CareLinkPayments {
 
     AggregatorV3Interface public ethUsdPriceFeed;
 
-    // Example: 1 USD = S$1.29
-    // Stored as 129000000 with 8 decimals.
-    uint256 public constant USD_TO_SGD_RATE_8_DECIMALS = 129000000;
+    IPyth public pyth;
 
-    // 7 Days. If the oracle price is older than this, do not use it.
-    uint256 public constant ORACLE_STALE_TIME_LIMIT = 7 days;
+    // Pyth Core Stable Price Feed ID for FX.USD/SGD.
+    bytes32 public constant USD_SGD_PRICE_FEED_ID =
+        0x396a969a9c1480fa15ed50bc59149e2c0075a72fe8f458ed941ddec48bdb4918;
+
+    // Pyth USD/SGD must be no older than 120 second (2mins).
+    uint256 public constant PYTH_PRICE_MAX_AGE = 120 seconds;
+
+    // If the Chainlink ETH/USD oracle price is older than this,
+    uint256 public constant ORACLE_STALE_TIME_LIMIT = 2 hours;
 
     uint256 private LastPaymentID;
     mapping(uint256 => Payment) public Payments;
@@ -133,14 +121,16 @@ contract CareLinkPayments {
         address _userContractAddress,
         address _ccnDayContractAddress,
         address _stallContractAddress,
-        address _ethUsdPriceFeedAddress
+        address _ethUsdPriceFeedAddress,
+        address _pythContractAddress
     ) {
         if (
             _organiserWallet == address(0) ||
             _userContractAddress == address(0) ||
             _ccnDayContractAddress == address(0) ||
             _stallContractAddress == address(0) ||
-            _ethUsdPriceFeedAddress == address(0)
+            _ethUsdPriceFeedAddress == address(0) ||
+            _pythContractAddress == address(0)
         ) {
             revert InvalidWallet();
         }
@@ -150,6 +140,8 @@ contract CareLinkPayments {
         ccnDayContract = ICareLinkCCNDayForPayments(_ccnDayContractAddress);
         stallContract = ICareLinkStallsForPayments(_stallContractAddress);
         ethUsdPriceFeed = AggregatorV3Interface(_ethUsdPriceFeedAddress);
+
+        pyth = IPyth(_pythContractAddress);
     }
 
     function DoesPaymentExist(uint256 _paymentId) public view returns (bool) {
@@ -197,6 +189,7 @@ contract CareLinkPayments {
 
         if (
             updatedAt == 0 ||
+            updatedAt > block.timestamp ||
             block.timestamp - updatedAt > ORACLE_STALE_TIME_LIMIT
         ) {
             revert StaleOraclePrice();
@@ -205,60 +198,115 @@ contract CareLinkPayments {
         return uint256(price);
     }
 
+    function ConvertPythPriceTo8Decimals(
+        PythStructs.Price memory _price
+    ) internal pure returns (uint256) {
+        if (_price.price <= 0) {
+            revert InvalidOraclePrice();
+        }
+
+        // Protect against unexpected Pyth exponent values.
+        if (_price.expo > 18 || _price.expo < -18) {
+            revert InvalidOraclePrice();
+        }
+
+        uint256 unsignedPrice = uint256(uint64(_price.price));
+
+        // Example:
+        // price = 128
+        // expo = 0
+        // Real price = 128
+        // 8-decimal representation = 12800000000
+        if (_price.expo >= 0) {
+            uint256 positiveExponent = uint256(uint32(_price.expo));
+
+            return unsignedPrice * (10 ** (positiveExponent + 8));
+        }
+
+        uint256 priceDecimals = uint256(-int256(_price.expo));
+
+        if (priceDecimals < 8) {
+            return unsignedPrice * (10 ** (8 - priceDecimals));
+        }
+
+        if (priceDecimals > 8) {
+            return unsignedPrice / (10 ** (priceDecimals - 8));
+        }
+
+        return unsignedPrice;
+    }
+
+    function GetLatestUSDSGDPrice8Decimals() public view returns (uint256) {
+        PythStructs.Price memory usdSgdPrice = pyth.getPriceNoOlderThan(
+            USD_SGD_PRICE_FEED_ID,
+            PYTH_PRICE_MAX_AGE
+        );
+
+        if (
+            usdSgdPrice.publishTime == 0 ||
+            usdSgdPrice.publishTime > block.timestamp
+        ) {
+            revert StaleOraclePrice();
+        }
+
+        return ConvertPythPriceTo8Decimals(usdSgdPrice);
+    }
+
+    function GetPythUpdateFee(
+        bytes[] calldata _pythPriceUpdate
+    ) public view returns (uint256) {
+        return pyth.getUpdateFee(_pythPriceUpdate);
+    }
+
     function CalculateRequiredWeiFromSGDCents(
-        uint256 _amountSGDCents
+        uint256 _amountSGDCents,
+        uint256 _usdSgdPrice8Decimals
     ) public view returns (uint256) {
         if (_amountSGDCents == 0) {
             revert InvalidPaymentAmount();
         }
 
+        if (_usdSgdPrice8Decimals == 0) {
+            revert InvalidOraclePrice();
+        }
+
         uint256 ethUsdPrice = GetLatestETHUSDPrice();
+        uint8 oracleDecimals = ethUsdPriceFeed.decimals();
 
-        uint256 ethSgdPrice = (ethUsdPrice * USD_TO_SGD_RATE_8_DECIMALS) / 1e8;
+        if (oracleDecimals > 18) {
+            revert UnsupportedOracleDecimals(oracleDecimals);
+        }
 
-        return (_amountSGDCents * 1e8 * 1 ether) / ethSgdPrice / 100;
+        uint256 oracleScale = 10 ** uint256(oracleDecimals);
+
+        uint256 ethSgdPrice = (ethUsdPrice * _usdSgdPrice8Decimals) / 1e8;
+
+        return (_amountSGDCents * oracleScale * 1 ether) / (ethSgdPrice * 100);
     }
 
     function CheckExactSGDPayment(
-        uint256 _amountSGDCents
+        uint256 _amountSGDCents,
+        uint256 _usdSgdPrice8Decimals,
+        uint256 _pythUpdateFee
     ) internal view returns (uint256) {
-        uint256 requiredWei = CalculateRequiredWeiFromSGDCents(_amountSGDCents);
+        uint256 requiredWei = CalculateRequiredWeiFromSGDCents(
+            _amountSGDCents,
+            _usdSgdPrice8Decimals
+        );
 
-        if (msg.value != requiredWei) {
-            revert IncorrectPaymentAmount(requiredWei, msg.value);
+        uint256 totalRequiredWei = requiredWei + _pythUpdateFee;
+
+        if (msg.value != totalRequiredWei) {
+            revert IncorrectPaymentAmount(totalRequiredWei, msg.value);
         }
 
         return requiredWei;
     }
 
-    function GetRequiredWeiForProduct(
-        uint256 _productId
-    )
-        public
-        view
-        returns (
-            uint256 stallId,
-            uint256 productPriceSGDCents,
-            uint256 requiredWei
-        )
-    {
-        ProductStatus productStatus;
-
-        (stallId, productPriceSGDCents, productStatus) = stallContract
-            .GetProductPaymentDetails(_productId);
-
-        if (productStatus != ProductStatus.Available) {
-            revert ProductNotAvailable();
-        }
-
-        requiredWei = CalculateRequiredWeiFromSGDCents(productPriceSGDCents);
-
-        return (stallId, productPriceSGDCents, requiredWei);
-    }
-
     function SavePayment(
         uint256 _stallId,
-        uint256 _amountPaidSGDCents
+        uint256 _amountPaidSGDCents,
+        uint256 _amountPaidWei
     ) internal returns (uint256) {
         if (msg.sender == Organiser) {
             revert OrganiserCannotPay();
@@ -268,7 +316,7 @@ contract CareLinkPayments {
             revert WalletNotRegistered();
         }
 
-        if (msg.value == 0) {
+        if (_amountPaidWei == 0) {
             revert InvalidPaymentAmount();
         }
 
@@ -287,7 +335,7 @@ contract CareLinkPayments {
             CCNDayID: stallContract.GetStallCCNDayID(_stallId),
             CustomerWallet: msg.sender,
             StallOwnerWallet: stallOwnerWallet,
-            AmountPaid: msg.value,
+            AmountPaid: _amountPaidWei,
             AmountPaidSGDCents: _amountPaidSGDCents,
             PaidAt: block.timestamp,
             RefundedAt: 0,
@@ -302,48 +350,46 @@ contract CareLinkPayments {
             newPaymentID,
             _stallId,
             msg.sender,
-            msg.value,
+            _amountPaidWei,
             _amountPaidSGDCents
         );
 
         return newPaymentID;
     }
 
-    function PayToStall(uint256 _stallId) public payable returns (uint256) {
-        CheckStallCanReceivePayment(_stallId);
-
-        return SavePayment(_stallId, 0);
-    }
-
     function PaySGDToStall(
         uint256 _stallId,
-        uint256 _amountSGDCents
+        uint256 _amountSGDCents,
+        bytes[] calldata _pythPriceUpdate
     ) public payable returns (uint256) {
         CheckStallCanReceivePayment(_stallId);
 
-        CheckExactSGDPayment(_amountSGDCents);
-
-        return SavePayment(_stallId, _amountSGDCents);
-    }
-
-    function PayForProduct(
-        uint256 _productId
-    ) public payable returns (uint256) {
-        (
-            uint256 stallId,
-            uint256 productPriceSGDCents,
-            ProductStatus productStatus
-        ) = stallContract.GetProductPaymentDetails(_productId);
-
-        if (productStatus != ProductStatus.Available) {
-            revert ProductNotAvailable();
+        if (_pythPriceUpdate.length == 0) {
+            revert InvalidOraclePrice();
         }
 
-        CheckStallCanReceivePayment(stallId);
+        uint256 pythUpdateFee = pyth.getUpdateFee(_pythPriceUpdate);
 
-        CheckExactSGDPayment(productPriceSGDCents);
+        if (msg.value <= pythUpdateFee) {
+            revert InvalidPaymentAmount();
+        }
 
-        return SavePayment(stallId, productPriceSGDCents);
+        // Submit the fresh signed USD/SGD price update to Pyth.
+        pyth.updatePriceFeeds{value: pythUpdateFee}(_pythPriceUpdate);
+
+        // Read the newly verified USD/SGD price.
+        uint256 usdSgdPrice8Decimals = GetLatestUSDSGDPrice8Decimals();
+
+        // Verify the customer sent:
+        // actual stall payment + Pyth update fee.
+        uint256 requiredPaymentWei = CheckExactSGDPayment(
+            _amountSGDCents,
+            usdSgdPrice8Decimals,
+            pythUpdateFee
+        );
+
+        // Store only the actual stall payment.
+        return SavePayment(_stallId, _amountSGDCents, requiredPaymentWei);
     }
 
     function RefundPayment(uint256 _paymentId) public {

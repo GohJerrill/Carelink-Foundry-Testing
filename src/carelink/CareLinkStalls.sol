@@ -5,23 +5,31 @@ import "./CareLinkTypes.sol";
 
 interface ICareLinkUsersForStalls {
     function IsWalletRegistered(address _wallet) external view returns (bool);
+
     function GetWalletUserType(
         address _wallet
     ) external view returns (UserType);
+
     function GetWalletSchool(address _wallet) external view returns (School);
 }
 
 interface ICareLinkCCNDayForStalls {
     function GetCurrentCCNDayID() external view returns (uint256);
+
     function DoesCCNDayExist(uint256 _ccnDayId) external view returns (bool);
+
     function IsCurrentCCNDayActive() external view returns (bool);
+
     function IsStallRegistrationOpen() external view returns (bool);
+
     function IsSchoolEligibleForCurrentCCNDay(
         School _school
     ) external view returns (bool);
+
     function GetCCNDayStartTime(
         uint256 _ccnDayId
     ) external view returns (uint256);
+
     function GetCCNDayEndTime(
         uint256 _ccnDayId
     ) external view returns (uint256);
@@ -40,10 +48,9 @@ contract CareLinkStalls {
     ICareLinkUsersForStalls public userContract;
     ICareLinkCCNDayForStalls public ccnDayContract;
     ICareLinkPaymentsForStalls public paymentContract;
-
     uint256 private LastStallID;
     mapping(uint256 => Stall) private Stalls;
-    uint256[] private StallIDList;
+    // uint256[] private StallIDList;
 
     uint256 private LastProductID;
     mapping(uint256 => Product) public Products;
@@ -70,11 +77,6 @@ contract CareLinkStalls {
     );
 
     event StallRejected(uint256 indexed StallID);
-
-    // event StallExpired(
-    //     uint256 indexed StallID,
-    //     address indexed StallOwnerWallet
-    // );
 
     event StallStatusUpdated(
         uint256 indexed StallID,
@@ -137,7 +139,7 @@ contract CareLinkStalls {
 
     modifier onlyCCNDayContract() {
         if (msg.sender != CCNDayContractAddress) {
-            revert NotOrganiser();
+            revert NotCCNDayContract();
         }
         _;
     }
@@ -161,28 +163,6 @@ contract CareLinkStalls {
     function DoesStallExist(uint256 _stallId) public view returns (bool) {
         return _stallId != 0 && Stalls[_stallId].StallID != 0;
     }
-
-    // function GenerateRandomStallID(
-    //     string memory _stallName,
-    //     address _stallOwnerWallet
-    // ) internal returns (uint256) {
-    //     StallRandomNonce++;
-    //
-    //     return
-    //         uint256(
-    //             keccak256(
-    //                 abi.encodePacked(
-    //                     block.timestamp,
-    //                     block.prevrandao,
-    //                     msg.sender,
-    //                     CurrentCCNDayID,
-    //                     _stallName,
-    //                     _stallOwnerWallet,
-    //                     StallRandomNonce
-    //                 )
-    //             )
-    //         );
-    // }
 
     function ValidateStallInputs(
         string memory _stallName,
@@ -467,24 +447,6 @@ contract CareLinkStalls {
         delete Stalls[_stallId];
     }
 
-    // function IsStallCCNDayOngoing(
-    //     uint256 _stallId
-    // ) internal view returns (bool) {
-    //     uint256 ccnDayId = Stalls[_stallId].CCNDayID;
-
-    //     if (ccnDayId == 0) {
-    //         return false;
-    //     }
-
-    //     if (!ccnDayContract.DoesCCNDayExist(ccnDayId)) {
-    //         return false;
-    //     }
-
-    //     return
-    //         block.timestamp >= ccnDayContract.GetCCNDayStartTime(ccnDayId) &&
-    //         block.timestamp <= ccnDayContract.GetCCNDayEndTime(ccnDayId);
-    // }
-
     function HasUnsettledPaidPayments(
         uint256 _stallId
     ) internal view returns (bool) {
@@ -667,7 +629,7 @@ contract CareLinkStalls {
             WithdrawalCompleted: false
         });
 
-        StallIDList.push(newStallID);
+        // StallIDList.push(newStallID);
         CCNDayStallIDs[currentCCNDayID].push(newStallID);
 
         OwnerStallIDs[msg.sender].push(newStallID);
@@ -782,6 +744,10 @@ contract CareLinkStalls {
             HasCreatedStall[stallOwnerWallet] = true;
         }
 
+        IsStallOwner[stallOwnerWallet] = IsWalletApprovedStallOwner(
+            stallOwnerWallet
+        );
+
         emit StallWithdrawalCompleted(_stallId, stallOwnerWallet);
     }
 
@@ -860,6 +826,10 @@ contract CareLinkStalls {
             revert OwnerCanOnlySetOpenOrClosed();
         }
 
+        if (Stalls[_stallId].stallStatus == _newStatus) {
+            revert StallStatusUnchanged();
+        }
+
         if (IsStallCCNDayEnded(_stallId)) {
             revert CCNDayAlreadyEnded();
         }
@@ -884,7 +854,7 @@ contract CareLinkStalls {
     }
 
     function GetMyStall() public view returns (Stall memory) {
-        uint256 stallId = GetWalletActiveOrUnresolvedStallID(msg.sender);
+        uint256 stallId = GetWalletStallID(msg.sender);
 
         if (stallId == 0) {
             revert WalletHasNotCreatedStall();
@@ -894,8 +864,25 @@ contract CareLinkStalls {
             revert StallDoesNotExist();
         }
 
-        return Stalls[stallId];
+        Stall memory stall = Stalls[stallId];
+        stall.stallStatus = GetEffectiveStallStatus(stallId);
+
+        return stall;
     }
+
+    // function GetMyStall() public view returns (Stall memory) {
+    //     uint256 stallId = GetWalletActiveOrUnresolvedStallID(msg.sender);
+
+    //     if (stallId == 0) {
+    //         revert WalletHasNotCreatedStall();
+    //     }
+
+    //     if (!DoesStallExist(stallId)) {
+    //         revert StallDoesNotExist();
+    //     }
+
+    //     return Stalls[stallId];
+    // }
 
     function GetMyStallHistory() public view returns (Stall[] memory) {
         uint256[] memory stallIds = OwnerStallIDs[msg.sender];
@@ -1188,47 +1175,6 @@ contract CareLinkStalls {
         return StallProductIDs[_stallId];
     }
 
-    function GetProductPaymentDetails(
-        uint256 _productId
-    )
-        public
-        view
-        returns (
-            uint256 stallId,
-            uint256 productPriceSGDCents,
-            ProductStatus productStatus
-        )
-    {
-        if (!DoesProductExist(_productId)) {
-            revert ProductDoesNotExist();
-        }
-
-        Product memory product = Products[_productId];
-
-        return (
-            product.StallID,
-            product.ProductPriceSGDCents,
-            product.productStatus
-        );
-    }
-
-    // function SetProductAvailability(
-    //     uint256 _productId,
-    //     ProductStatus _productStatus
-    // ) public {
-    //     if (!DoesProductExist(_productId)) {
-    //         revert ProductDoesNotExist();
-    //     }
-
-    //     uint256 stallId = Products[_productId].StallID;
-
-    //     CheckCanManageStallProduct(stallId);
-
-    //     Products[_productId].productStatus = _productStatus;
-
-    //     emit ProductAvailabilityUpdated(_productId, _productStatus);
-    // }
-
     function DeleteProduct(uint256 _productId) public {
         if (!DoesProductExist(_productId)) {
             revert ProductDoesNotExist();
@@ -1305,8 +1251,29 @@ contract CareLinkStalls {
         return Stalls[_stallId].AllowedWithdrawal;
     }
 
+    // function GetWalletStallID(address _wallet) public view returns (uint256) {
+    //     return GetWalletActiveOrUnresolvedStallID(_wallet);
+    // }
+
     function GetWalletStallID(address _wallet) public view returns (uint256) {
-        return GetWalletActiveOrUnresolvedStallID(_wallet);
+        uint256 activeOrUnresolvedStallId = GetWalletActiveOrUnresolvedStallID(
+            _wallet
+        );
+
+        if (activeOrUnresolvedStallId != 0) {
+            return activeOrUnresolvedStallId;
+        }
+
+        uint256 trackedStallId = WalletStallID[_wallet];
+
+        if (
+            DoesStallExist(trackedStallId) &&
+            IsPendingStallExpired(trackedStallId)
+        ) {
+            return trackedStallId;
+        }
+
+        return 0;
     }
 
     function GetOwnerStallIDs(

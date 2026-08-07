@@ -9,6 +9,7 @@ interface ICareLinkStallsForCCNDay {
 
 contract CareLinkCCNDay {
     address public Organiser;
+
     ICareLinkStallsForCCNDay public stallContract;
 
     mapping(uint256 => mapping(School => bool)) public CCNEligibleSchools;

@@ -10,6 +10,7 @@ import {CareLinkStalls} from "../../src/carelink/CareLinkStalls.sol";
 import {CareLinkPayments, AggregatorV3Interface} from "../../src/carelink/CareLinkPayments.sol";
 
 import "../../src/carelink/CareLinkTypes.sol";
+import "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
 
 // ===============================================================
 // MOCK CHAINLINK ETH/USD PRICE FEED
@@ -42,6 +43,10 @@ contract MockETHUSDPriceFeed is AggregatorV3Interface {
         currentUpdatedAt = _updatedAt;
     }
 
+    function SetDecimals(uint8 _decimals) external {
+        feedDecimals = _decimals;
+    }
+
     function decimals() external view returns (uint8) {
         return feedDecimals;
     }
@@ -58,6 +63,101 @@ contract MockETHUSDPriceFeed is AggregatorV3Interface {
         )
     {
         return (1, currentAnswer, currentUpdatedAt, currentUpdatedAt, 1);
+    }
+}
+
+// ===============================================================
+// MOCK PYTH USD/SGD PRICE FEED
+// ===============================================================
+
+contract MockPyth {
+    PythStructs.Price internal currentPrice;
+
+    uint256 public updateFee;
+    uint256 public updateCallCount;
+    uint256 public lastUpdateFeePaid;
+
+    bool public shouldRevertOnUpdate;
+
+    error MockPythPriceTooOld();
+    error MockPythUpdateFailed();
+
+    constructor(
+        int64 _price,
+        uint64 _confidence,
+        int32 _expo,
+        uint256 _publishTime,
+        uint256 _updateFee
+    ) {
+        currentPrice = PythStructs.Price({
+            price: _price,
+            conf: _confidence,
+            expo: _expo,
+            publishTime: _publishTime
+        });
+
+        updateFee = _updateFee;
+    }
+
+    function SetPrice(
+        int64 _price,
+        uint64 _confidence,
+        int32 _expo,
+        uint256 _publishTime
+    ) external {
+        currentPrice = PythStructs.Price({
+            price: _price,
+            conf: _confidence,
+            expo: _expo,
+            publishTime: _publishTime
+        });
+    }
+
+    function SetUpdateFee(uint256 _updateFee) external {
+        updateFee = _updateFee;
+    }
+
+    function SetShouldRevertOnUpdate(bool _shouldRevert) external {
+        shouldRevertOnUpdate = _shouldRevert;
+    }
+
+    function getUpdateFee(bytes[] calldata) external view returns (uint256) {
+        return updateFee;
+    }
+
+    function updatePriceFeeds(bytes[] calldata) external payable {
+        if (shouldRevertOnUpdate) {
+            revert MockPythUpdateFailed();
+        }
+
+        updateCallCount++;
+        lastUpdateFeePaid = msg.value;
+
+        /*
+         * Simulate a successful fresh Pyth update.
+         */
+        currentPrice.publishTime = block.timestamp;
+    }
+
+    function getPriceNoOlderThan(
+        bytes32,
+        uint256 _age
+    ) external view returns (PythStructs.Price memory) {
+        /*
+         * Real Pyth rejects prices older than the requested age.
+         *
+         * We intentionally allow future/zero timestamps through here
+         * because CareLinkPayments itself checks those conditions.
+         */
+        if (
+            currentPrice.publishTime != 0 &&
+            currentPrice.publishTime <= block.timestamp &&
+            block.timestamp - currentPrice.publishTime > _age
+        ) {
+            revert MockPythPriceTooOld();
+        }
+
+        return currentPrice;
     }
 }
 
@@ -98,14 +198,16 @@ contract CareLinkPaymentsHarness is CareLinkPayments {
         address _userContractAddress,
         address _ccnDayContractAddress,
         address _stallContractAddress,
-        address _ethUsdPriceFeedAddress
+        address _ethUsdPriceFeedAddress,
+        address _pythContractAddress
     )
         CareLinkPayments(
             _organiserWallet,
             _userContractAddress,
             _ccnDayContractAddress,
             _stallContractAddress,
-            _ethUsdPriceFeedAddress
+            _ethUsdPriceFeedAddress,
+            _pythContractAddress
         )
     {}
 
@@ -120,6 +222,12 @@ contract CareLinkPaymentsHarness is CareLinkPayments {
     ) external view returns (Withdrawal memory) {
         return Withdrawals[_withdrawalId];
     }
+
+    function ExposedConvertPythPriceTo8Decimals(
+        PythStructs.Price memory _price
+    ) external pure returns (uint256) {
+        return ConvertPythPriceTo8Decimals(_price);
+    }
 }
 
 // ===============================================================
@@ -132,6 +240,7 @@ contract CareLinkPaymentsTest is Test {
     CareLinkStalls internal stallsContract;
     CareLinkPaymentsHarness internal paymentsContract;
     MockETHUSDPriceFeed internal priceFeed;
+    MockPyth internal mockPyth;
 
     address internal organiser;
     address internal stallOwner;
@@ -161,8 +270,22 @@ contract CareLinkPaymentsTest is Test {
 
     int256 internal constant ETH_USD_PRICE = 3000e8;
 
-    uint256 internal constant DIRECT_PAYMENT_AMOUNT = 1 ether;
-    uint256 internal constant PRODUCT_PRICE_SGD_CENTS = 500;
+    int64 internal constant PYTH_USD_SGD_PRICE = 125000;
+    int32 internal constant PYTH_USD_SGD_EXPO = -5;
+    uint64 internal constant PYTH_CONFIDENCE = 100;
+
+    /*
+     * 125000 × 10^-5 = 1.25 SGD/USD
+     *
+     * Converted into CareLink's 8-decimal format:
+     * 1.25 = 125000000
+     */
+    uint256 internal constant USD_SGD_PRICE_8_DECIMALS = 125000000;
+
+    uint256 internal constant PYTH_UPDATE_FEE = 0.000001 ether;
+
+    uint256 internal constant DEFAULT_PAYMENT_SGD_CENTS = 500;
+    uint256 internal constant SECOND_PAYMENT_SGD_CENTS = 1000;
 
     // These declarations allow vm.expectEmit() to compare events.
     event PaymentCreated(
@@ -234,12 +357,21 @@ contract CareLinkPaymentsTest is Test {
          */
         priceFeed = new MockETHUSDPriceFeed(8, ETH_USD_PRICE, BASE_TIME);
 
+        mockPyth = new MockPyth(
+            PYTH_USD_SGD_PRICE,
+            PYTH_CONFIDENCE,
+            PYTH_USD_SGD_EXPO,
+            BASE_TIME,
+            PYTH_UPDATE_FEE
+        );
+
         paymentsContract = new CareLinkPaymentsHarness(
             organiser,
             address(usersContract),
             address(ccnDayContract),
             address(stallsContract),
-            address(priceFeed)
+            address(priceFeed),
+            address(mockPyth)
         );
 
         /*
@@ -334,63 +466,55 @@ contract CareLinkPaymentsTest is Test {
         return stallId;
     }
 
-    function _createProduct(
-        uint256 _stallId,
-        address _owner,
-        ProductStatus _status
-    ) internal returns (uint256) {
-        vm.prank(_owner);
+    function _validPythUpdate()
+        internal
+        pure
+        returns (bytes[] memory priceUpdate)
+    {
+        priceUpdate = new bytes[](1);
 
-        return
-            stallsContract.CreateProduct(
-                _stallId,
-                "Chicken Rice",
-                "Freshly prepared chicken rice",
-                "ipfs://chicken-rice",
-                PRODUCT_PRICE_SGD_CENTS,
-                _status
-            );
+        /*
+         * The mock does not need a real signed Pyth VAA.
+         *
+         * It only needs non-empty bytes because we're testing
+         * CareLink's interaction logic, not Pyth's cryptography.
+         */
+        priceUpdate[0] = hex"123456";
     }
 
-    function _payDirect(
-        uint256 _stallId,
-        address _buyer,
-        uint256 _amount
-    ) internal returns (uint256) {
-        vm.prank(_buyer);
+    function _refreshChainlinkPrice() internal {
+        priceFeed.SetRoundData(ETH_USD_PRICE, block.timestamp);
+    }
 
-        return paymentsContract.PayToStall{value: _amount}(_stallId);
+    function _calculateRequiredWei(
+        uint256 _amountSGDCents
+    ) internal view returns (uint256) {
+        return
+            paymentsContract.CalculateRequiredWeiFromSGDCents(
+                _amountSGDCents,
+                USD_SGD_PRICE_8_DECIMALS
+            );
     }
 
     function _paySGD(
         uint256 _stallId,
         address _buyer,
         uint256 _amountSGDCents
-    ) internal returns (uint256 paymentId) {
-        uint256 requiredWei = paymentsContract.CalculateRequiredWeiFromSGDCents(
-            _amountSGDCents
-        );
+    ) internal returns (uint256 paymentId, uint256 requiredWei) {
+        _refreshChainlinkPrice();
+
+        requiredWei = _calculateRequiredWei(_amountSGDCents);
+
+        bytes[] memory priceUpdate = _validPythUpdate();
+
+        uint256 totalRequiredWei = requiredWei + PYTH_UPDATE_FEE;
 
         vm.prank(_buyer);
 
-        paymentId = paymentsContract.PaySGDToStall{value: requiredWei}(
+        paymentId = paymentsContract.PaySGDToStall{value: totalRequiredWei}(
             _stallId,
-            _amountSGDCents
-        );
-    }
-
-    function _payForProduct(
-        uint256 _productId,
-        address _buyer
-    ) internal returns (uint256 paymentId) {
-        (, , uint256 requiredWei) = paymentsContract.GetRequiredWeiForProduct(
-            _productId
-        );
-
-        vm.prank(_buyer);
-
-        paymentId = paymentsContract.PayForProduct{value: requiredWei}(
-            _productId
+            _amountSGDCents,
+            priceUpdate
         );
     }
 
@@ -417,6 +541,8 @@ contract CareLinkPaymentsTest is Test {
             address(ccnDayContract)
         );
 
+        assertEq(address(paymentsContract.pyth()), address(mockPyth));
+
         assertEq(
             address(paymentsContract.stallContract()),
             address(stallsContract)
@@ -436,7 +562,8 @@ contract CareLinkPaymentsTest is Test {
             address(usersContract),
             address(ccnDayContract),
             address(stallsContract),
-            address(priceFeed)
+            address(priceFeed),
+            address(mockPyth)
         );
     }
 
@@ -448,7 +575,8 @@ contract CareLinkPaymentsTest is Test {
             address(0),
             address(ccnDayContract),
             address(stallsContract),
-            address(priceFeed)
+            address(priceFeed),
+            address(mockPyth)
         );
     }
 
@@ -460,7 +588,8 @@ contract CareLinkPaymentsTest is Test {
             address(usersContract),
             address(0),
             address(stallsContract),
-            address(priceFeed)
+            address(priceFeed),
+            address(mockPyth)
         );
     }
 
@@ -472,7 +601,8 @@ contract CareLinkPaymentsTest is Test {
             address(usersContract),
             address(ccnDayContract),
             address(0),
-            address(priceFeed)
+            address(priceFeed),
+            address(mockPyth)
         );
     }
 
@@ -484,6 +614,20 @@ contract CareLinkPaymentsTest is Test {
             address(usersContract),
             address(ccnDayContract),
             address(stallsContract),
+            address(0),
+            address(mockPyth)
+        );
+    }
+
+    function test_ConstructorRevertsForZeroPythAddress() public {
+        vm.expectRevert(InvalidWallet.selector);
+
+        new CareLinkPaymentsHarness(
+            organiser,
+            address(usersContract),
+            address(ccnDayContract),
+            address(stallsContract),
+            address(priceFeed),
             address(0)
         );
     }
@@ -502,7 +646,7 @@ contract CareLinkPaymentsTest is Test {
     function test_GetLatestETHUSDPriceRevertsForZeroPrice() public {
         priceFeed.SetRoundData(0, BASE_TIME);
 
-        vm.expectRevert(CareLinkPayments.InvalidOraclePrice.selector);
+        vm.expectRevert(InvalidOraclePrice.selector);
 
         paymentsContract.GetLatestETHUSDPrice();
     }
@@ -510,7 +654,7 @@ contract CareLinkPaymentsTest is Test {
     function test_GetLatestETHUSDPriceRevertsForNegativePrice() public {
         priceFeed.SetRoundData(-1, BASE_TIME);
 
-        vm.expectRevert(CareLinkPayments.InvalidOraclePrice.selector);
+        vm.expectRevert(InvalidOraclePrice.selector);
 
         paymentsContract.GetLatestETHUSDPrice();
     }
@@ -518,13 +662,13 @@ contract CareLinkPaymentsTest is Test {
     function test_GetLatestETHUSDPriceRevertsForZeroUpdateTime() public {
         priceFeed.SetRoundData(ETH_USD_PRICE, 0);
 
-        vm.expectRevert(CareLinkPayments.StaleOraclePrice.selector);
+        vm.expectRevert(StaleOraclePrice.selector);
 
         paymentsContract.GetLatestETHUSDPrice();
     }
 
     function test_GetLatestETHUSDPriceAcceptsExactStaleLimit() public {
-        priceFeed.SetRoundData(ETH_USD_PRICE, BASE_TIME - 7 days);
+        priceFeed.SetRoundData(ETH_USD_PRICE, BASE_TIME - 2 hours);
 
         assertEq(
             paymentsContract.GetLatestETHUSDPrice(),
@@ -533,29 +677,201 @@ contract CareLinkPaymentsTest is Test {
     }
 
     function test_GetLatestETHUSDPriceRevertsAfterStaleLimit() public {
-        priceFeed.SetRoundData(ETH_USD_PRICE, BASE_TIME - 7 days - 1);
+        priceFeed.SetRoundData(ETH_USD_PRICE, BASE_TIME - 2 hours - 1);
 
-        vm.expectRevert(CareLinkPayments.StaleOraclePrice.selector);
+        vm.expectRevert(StaleOraclePrice.selector);
 
         paymentsContract.GetLatestETHUSDPrice();
+    }
+
+    function test_GetLatestETHUSDPriceRevertsForFutureTimestamp() public {
+        priceFeed.SetRoundData(ETH_USD_PRICE, BASE_TIME + 1);
+
+        vm.expectRevert(StaleOraclePrice.selector);
+
+        paymentsContract.GetLatestETHUSDPrice();
+    }
+
+    // ===============================================================
+    // PYTH USD/SGD ORACLE TESTS
+    // ===============================================================
+
+    function test_GetLatestUSDSGDPriceReturnsValidPrice() public view {
+        assertEq(
+            paymentsContract.GetLatestUSDSGDPrice8Decimals(),
+            USD_SGD_PRICE_8_DECIMALS
+        );
+    }
+
+    function test_GetPythUpdateFeeReturnsExpectedFee() public view {
+        bytes[] memory priceUpdate = _validPythUpdate();
+
+        assertEq(
+            paymentsContract.GetPythUpdateFee(priceUpdate),
+            PYTH_UPDATE_FEE
+        );
+    }
+
+    function test_GetLatestUSDSGDPriceRevertsForZeroPrice() public {
+        mockPyth.SetPrice(0, PYTH_CONFIDENCE, PYTH_USD_SGD_EXPO, BASE_TIME);
+
+        vm.expectRevert(InvalidOraclePrice.selector);
+
+        paymentsContract.GetLatestUSDSGDPrice8Decimals();
+    }
+
+    function test_GetLatestUSDSGDPriceRevertsForNegativePrice() public {
+        mockPyth.SetPrice(-1, PYTH_CONFIDENCE, PYTH_USD_SGD_EXPO, BASE_TIME);
+
+        vm.expectRevert(InvalidOraclePrice.selector);
+
+        paymentsContract.GetLatestUSDSGDPrice8Decimals();
+    }
+
+    function test_GetLatestUSDSGDPriceRevertsForZeroPublishTime() public {
+        mockPyth.SetPrice(
+            PYTH_USD_SGD_PRICE,
+            PYTH_CONFIDENCE,
+            PYTH_USD_SGD_EXPO,
+            0
+        );
+
+        vm.expectRevert(StaleOraclePrice.selector);
+
+        paymentsContract.GetLatestUSDSGDPrice8Decimals();
+    }
+
+    function test_GetLatestUSDSGDPriceRevertsForFuturePublishTime() public {
+        mockPyth.SetPrice(
+            PYTH_USD_SGD_PRICE,
+            PYTH_CONFIDENCE,
+            PYTH_USD_SGD_EXPO,
+            BASE_TIME + 1
+        );
+
+        vm.expectRevert(StaleOraclePrice.selector);
+
+        paymentsContract.GetLatestUSDSGDPrice8Decimals();
+    }
+
+    function test_GetLatestUSDSGDPriceRejectsPriceOlderThan120Seconds() public {
+        mockPyth.SetPrice(
+            PYTH_USD_SGD_PRICE,
+            PYTH_CONFIDENCE,
+            PYTH_USD_SGD_EXPO,
+            BASE_TIME - 121
+        );
+
+        vm.expectRevert(MockPyth.MockPythPriceTooOld.selector);
+
+        paymentsContract.GetLatestUSDSGDPrice8Decimals();
+    }
+
+    function test_ConvertPythPriceWithMinus5Exponent() public view {
+        PythStructs.Price memory price = PythStructs.Price({
+            price: 127885,
+            conf: 100,
+            expo: -5,
+            publishTime: BASE_TIME
+        });
+
+        uint256 converted = paymentsContract.ExposedConvertPythPriceTo8Decimals(
+            price
+        );
+
+        /*
+         * 127885 × 10^-5 = 1.27885
+         *
+         * 8 decimals:
+         * 1.27885000 = 127885000
+         */
+        assertEq(converted, 127885000);
+    }
+
+    function test_ConvertPythPriceAlreadyAt8Decimals() public view {
+        PythStructs.Price memory price = PythStructs.Price({
+            price: 127885000,
+            conf: 100,
+            expo: -8,
+            publishTime: BASE_TIME
+        });
+
+        assertEq(
+            paymentsContract.ExposedConvertPythPriceTo8Decimals(price),
+            127885000
+        );
+    }
+
+    function test_ConvertPythPriceWithMoreThan8Decimals() public view {
+        PythStructs.Price memory price = PythStructs.Price({
+            price: 12788500000,
+            conf: 100,
+            expo: -10,
+            publishTime: BASE_TIME
+        });
+
+        assertEq(
+            paymentsContract.ExposedConvertPythPriceTo8Decimals(price),
+            127885000
+        );
+    }
+
+    function test_ConvertPythPriceWithZeroExponent() public view {
+        PythStructs.Price memory price = PythStructs.Price({
+            price: 2,
+            conf: 100,
+            expo: 0,
+            publishTime: BASE_TIME
+        });
+
+        assertEq(
+            paymentsContract.ExposedConvertPythPriceTo8Decimals(price),
+            200000000
+        );
+    }
+
+    function test_ConvertPythPriceRejectsExponentAbove18() public {
+        PythStructs.Price memory price = PythStructs.Price({
+            price: 1,
+            conf: 100,
+            expo: 19,
+            publishTime: BASE_TIME
+        });
+
+        vm.expectRevert(InvalidOraclePrice.selector);
+
+        paymentsContract.ExposedConvertPythPriceTo8Decimals(price);
+    }
+
+    function test_ConvertPythPriceRejectsExponentBelowMinus18() public {
+        PythStructs.Price memory price = PythStructs.Price({
+            price: 1,
+            conf: 100,
+            expo: -19,
+            publishTime: BASE_TIME
+        });
+
+        vm.expectRevert(InvalidOraclePrice.selector);
+
+        paymentsContract.ExposedConvertPythPriceTo8Decimals(price);
     }
 
     // ===============================================================
     // SGD TO WEI CONVERSION
     // ===============================================================
 
-    function test_CalculateRequiredWeiUsesExpectedFormula() public view {
+    function test_CalculateRequiredWeiUsesBothOraclePrices() public view {
         uint256 amountSGDCents = 1000;
 
         uint256 ethSgdPrice = (uint256(ETH_USD_PRICE) *
-            paymentsContract.USD_TO_SGD_RATE_8_DECIMALS()) / 1e8;
+            USD_SGD_PRICE_8_DECIMALS) / 1e8;
 
         uint256 expectedWei = (amountSGDCents * 1e8 * 1 ether) /
-            ethSgdPrice /
-            100;
+            (ethSgdPrice * 100);
 
         uint256 actualWei = paymentsContract.CalculateRequiredWeiFromSGDCents(
-            amountSGDCents
+            amountSGDCents,
+            USD_SGD_PRICE_8_DECIMALS
         );
 
         assertEq(actualWei, expectedWei);
@@ -565,27 +881,61 @@ contract CareLinkPaymentsTest is Test {
     function test_CalculateRequiredWeiRevertsForZeroSGDCents() public {
         vm.expectRevert(InvalidPaymentAmount.selector);
 
-        paymentsContract.CalculateRequiredWeiFromSGDCents(0);
+        paymentsContract.CalculateRequiredWeiFromSGDCents(
+            0,
+            USD_SGD_PRICE_8_DECIMALS
+        );
+    }
+
+    function test_CalculateRequiredWeiRevertsForZeroUSDSGDPrice() public {
+        vm.expectRevert(InvalidOraclePrice.selector);
+
+        paymentsContract.CalculateRequiredWeiFromSGDCents(500, 0);
+    }
+
+    function test_CalculateRequiredWeiRevertsForUnsupportedChainlinkDecimals()
+        public
+    {
+        priceFeed.SetDecimals(19);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(UnsupportedOracleDecimals.selector, 19)
+        );
+
+        paymentsContract.CalculateRequiredWeiFromSGDCents(
+            500,
+            USD_SGD_PRICE_8_DECIMALS
+        );
+    }
+
+    function test_HigherUSDSGDRateRequiresLessWei() public view {
+        uint256 lowerRateRequiredWei = paymentsContract
+            .CalculateRequiredWeiFromSGDCents(1000, 120000000);
+
+        uint256 higherRateRequiredWei = paymentsContract
+            .CalculateRequiredWeiFromSGDCents(1000, 140000000);
+
+        assertLt(higherRateRequiredWei, lowerRateRequiredWei);
     }
 
     function test_HigherSGDAmountRequiresMoreWei() public view {
         uint256 smallerAmount = paymentsContract
-            .CalculateRequiredWeiFromSGDCents(500);
+            .CalculateRequiredWeiFromSGDCents(500, USD_SGD_PRICE_8_DECIMALS);
 
         uint256 largerAmount = paymentsContract
-            .CalculateRequiredWeiFromSGDCents(1000);
+            .CalculateRequiredWeiFromSGDCents(1000, USD_SGD_PRICE_8_DECIMALS);
 
         assertGt(largerAmount, smallerAmount);
     }
 
     function test_HigherETHPriceRequiresLessWei() public {
         uint256 originalRequiredWei = paymentsContract
-            .CalculateRequiredWeiFromSGDCents(1000);
+            .CalculateRequiredWeiFromSGDCents(1000, USD_SGD_PRICE_8_DECIMALS);
 
         priceFeed.SetRoundData(4000e8, BASE_TIME);
 
         uint256 newRequiredWei = paymentsContract
-            .CalculateRequiredWeiFromSGDCents(1000);
+            .CalculateRequiredWeiFromSGDCents(1000, USD_SGD_PRICE_8_DECIMALS);
 
         assertLt(newRequiredWei, originalRequiredWei);
     }
@@ -600,7 +950,8 @@ contract CareLinkPaymentsTest is Test {
         );
 
         uint256 requiredWei = paymentsContract.CalculateRequiredWeiFromSGDCents(
-            boundedAmount
+            boundedAmount,
+            USD_SGD_PRICE_8_DECIMALS
         );
 
         assertGt(requiredWei, 0);
@@ -620,59 +971,259 @@ contract CareLinkPaymentsTest is Test {
     }
 
     // ===============================================================
-    // DIRECT PAYMENT SUCCESS
+    // SGD PAYMENT SUCCESS AND PYTH UPDATE
     // ===============================================================
 
-    function test_PayToStallCreatesPaymentAndStoresInformation() public {
+    function test_PaySGDToStallCreatesCompletePayment() public {
         uint256 stallId = _createApprovedStall(stallOwner);
 
         vm.warp(CCN_START);
 
+        _refreshChainlinkPrice();
+
+        uint256 requiredWei = _calculateRequiredWei(DEFAULT_PAYMENT_SGD_CENTS);
+
+        bytes[] memory priceUpdate = _validPythUpdate();
+
+        uint256 totalRequiredWei = requiredWei + PYTH_UPDATE_FEE;
+
         vm.expectEmit(true, true, false, true, address(paymentsContract));
 
-        emit PaymentCreated(1, stallId, customer, DIRECT_PAYMENT_AMOUNT, 0);
+        emit PaymentCreated(
+            1,
+            stallId,
+            customer,
+            requiredWei,
+            DEFAULT_PAYMENT_SGD_CENTS
+        );
 
         vm.prank(customer);
 
-        uint256 paymentId = paymentsContract.PayToStall{
-            value: DIRECT_PAYMENT_AMOUNT
-        }(stallId);
+        uint256 paymentId = paymentsContract.PaySGDToStall{
+            value: totalRequiredWei
+        }(stallId, DEFAULT_PAYMENT_SGD_CENTS, priceUpdate);
 
         assertEq(paymentId, 1);
-
         assertTrue(paymentsContract.DoesPaymentExist(paymentId));
 
         Payment memory payment = paymentsContract.GetPaymentStruct(paymentId);
 
-        assertEq(payment.PaymentID, paymentId);
+        assertEq(payment.PaymentID, 1);
         assertEq(payment.StallID, stallId);
         assertEq(payment.CCNDayID, 1);
+
         assertEq(payment.CustomerWallet, customer);
+
         assertEq(payment.StallOwnerWallet, stallOwner);
 
-        assertEq(payment.AmountPaid, DIRECT_PAYMENT_AMOUNT);
+        assertEq(payment.AmountPaid, requiredWei);
 
-        assertEq(payment.AmountPaidSGDCents, 0);
+        assertEq(payment.AmountPaidSGDCents, DEFAULT_PAYMENT_SGD_CENTS);
+
         assertEq(payment.PaidAt, CCN_START);
         assertEq(payment.RefundedAt, 0);
 
         assertEq(uint256(payment.paymentStatus), uint256(PaymentStatus.Paid));
 
-        assertEq(address(paymentsContract).balance, DIRECT_PAYMENT_AMOUNT);
+        /*
+         * Pyth received its own fee.
+         */
+        assertEq(mockPyth.lastUpdateFeePaid(), PYTH_UPDATE_FEE);
+
+        assertEq(mockPyth.updateCallCount(), 1);
+
+        /*
+         * CRITICAL ACCOUNTING TEST:
+         *
+         * CareLink retains ONLY stall payment.
+         * Pyth fee must not enter AmountPaid.
+         */
+        assertEq(address(paymentsContract).balance, requiredWei);
+
+        assertEq(address(mockPyth).balance, PYTH_UPDATE_FEE);
     }
+
+    function test_PaySGDToStallRevertsForEmptyPythUpdate() public {
+        uint256 stallId = _createApprovedStall(stallOwner);
+
+        vm.warp(CCN_START);
+
+        bytes[] memory emptyUpdate = new bytes[](0);
+
+        vm.expectRevert(InvalidOraclePrice.selector);
+
+        vm.prank(customer);
+
+        paymentsContract.PaySGDToStall{value: 1 ether}(
+            stallId,
+            DEFAULT_PAYMENT_SGD_CENTS,
+            emptyUpdate
+        );
+    }
+
+    function test_PaySGDToStallRevertsWhenValueDoesNotExceedPythFee() public {
+        uint256 stallId = _createApprovedStall(stallOwner);
+
+        vm.warp(CCN_START);
+
+        bytes[] memory priceUpdate = _validPythUpdate();
+
+        vm.expectRevert(InvalidPaymentAmount.selector);
+
+        vm.prank(customer);
+
+        paymentsContract.PaySGDToStall{value: PYTH_UPDATE_FEE}(
+            stallId,
+            DEFAULT_PAYMENT_SGD_CENTS,
+            priceUpdate
+        );
+    }
+
+    function test_PaySGDToStallRevertsWhenPythUpdateFails() public {
+        uint256 stallId = _createApprovedStall(stallOwner);
+
+        vm.warp(CCN_START);
+
+        _refreshChainlinkPrice();
+
+        mockPyth.SetShouldRevertOnUpdate(true);
+
+        uint256 requiredWei = _calculateRequiredWei(DEFAULT_PAYMENT_SGD_CENTS);
+
+        bytes[] memory priceUpdate = _validPythUpdate();
+
+        vm.expectRevert(MockPyth.MockPythUpdateFailed.selector);
+
+        vm.prank(customer);
+
+        paymentsContract.PaySGDToStall{value: requiredWei + PYTH_UPDATE_FEE}(
+            stallId,
+            DEFAULT_PAYMENT_SGD_CENTS,
+            priceUpdate
+        );
+
+        assertFalse(paymentsContract.DoesPaymentExist(1));
+
+        assertEq(mockPyth.updateCallCount(), 0);
+    }
+
+    // ===============================================================
+    // PAYMENT TIME AND STALL VALIDATION
+    // ===============================================================
+
+    function test_PaySGDToStallRevertsBeforeCCNDayStarts() public {
+        uint256 stallId = _createApprovedStall(stallOwner);
+
+        bytes[] memory priceUpdate = _validPythUpdate();
+
+        vm.expectRevert(CCNDayPaymentNotStarted.selector);
+
+        vm.prank(customer);
+
+        paymentsContract.PaySGDToStall{value: 1 ether}(
+            stallId,
+            DEFAULT_PAYMENT_SGD_CENTS,
+            priceUpdate
+        );
+    }
+
+    function test_PaySGDToStallRevertsAfterCCNDayEnds() public {
+        uint256 stallId = _createApprovedStall(stallOwner);
+
+        vm.warp(CCN_END + 1);
+
+        bytes[] memory priceUpdate = _validPythUpdate();
+
+        vm.expectRevert(CCNDayPaymentEnded.selector);
+
+        vm.prank(customer);
+
+        paymentsContract.PaySGDToStall{value: 1 ether}(
+            stallId,
+            DEFAULT_PAYMENT_SGD_CENTS,
+            priceUpdate
+        );
+    }
+
+    function test_PaySGDToStallRevertsForUnknownStall() public {
+        vm.warp(CCN_START);
+
+        bytes[] memory priceUpdate = _validPythUpdate();
+
+        vm.expectRevert(StallDoesNotExist.selector);
+
+        vm.prank(customer);
+
+        paymentsContract.PaySGDToStall{value: 1 ether}(
+            999,
+            DEFAULT_PAYMENT_SGD_CENTS,
+            priceUpdate
+        );
+    }
+
+    function test_PaySGDToStallRevertsWhenStallIsClosed() public {
+        uint256 stallId = _createApprovedStall(stallOwner);
+
+        vm.prank(stallOwner);
+        stallsContract.UpdateMyStallOpenStatus(stallId, StallStatus.Closed);
+
+        vm.warp(CCN_START);
+
+        bytes[] memory priceUpdate = _validPythUpdate();
+
+        vm.expectRevert(StallNotOpenForPayment.selector);
+
+        vm.prank(customer);
+
+        paymentsContract.PaySGDToStall{value: 1 ether}(
+            stallId,
+            DEFAULT_PAYMENT_SGD_CENTS,
+            priceUpdate
+        );
+    }
+
+    function test_PaySGDToStallRevertsForOldCCNDayStall() public {
+        uint256 oldStallId = _createApprovedStall(stallOwner);
+
+        _createSecondCCNDay();
+
+        vm.warp(SECOND_CCN_START);
+
+        bytes[] memory priceUpdate = _validPythUpdate();
+
+        vm.expectRevert(StallNotFromCurrentCCNDay.selector);
+
+        vm.prank(customer);
+
+        paymentsContract.PaySGDToStall{value: 1 ether}(
+            oldStallId,
+            DEFAULT_PAYMENT_SGD_CENTS,
+            priceUpdate
+        );
+    }
+
+    // ===============================================================
+    // PAYMENT BOUNDARY SUCCESS
+    // ===============================================================
 
     function test_PaymentSucceedsAtExactCCNStartBoundary() public {
         uint256 stallId = _createApprovedStall(stallOwner);
 
         vm.warp(CCN_START);
 
-        uint256 paymentId = _payDirect(
+        (uint256 paymentId, uint256 amountPaidWei) = _paySGD(
             stallId,
             customer,
-            DIRECT_PAYMENT_AMOUNT
+            DEFAULT_PAYMENT_SGD_CENTS
         );
 
         assertTrue(paymentsContract.DoesPaymentExist(paymentId));
+
+        Payment memory payment = paymentsContract.GetPaymentStruct(paymentId);
+
+        assertEq(payment.PaidAt, CCN_START);
+        assertEq(payment.AmountPaid, amountPaidWei);
+        assertEq(payment.AmountPaidSGDCents, DEFAULT_PAYMENT_SGD_CENTS);
     }
 
     function test_PaymentSucceedsAtExactCCNEndBoundary() public {
@@ -680,13 +1231,18 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_END);
 
-        uint256 paymentId = _payDirect(
+        (uint256 paymentId, uint256 amountPaidWei) = _paySGD(
             stallId,
             customer,
-            DIRECT_PAYMENT_AMOUNT
+            DEFAULT_PAYMENT_SGD_CENTS
         );
 
         assertTrue(paymentsContract.DoesPaymentExist(paymentId));
+
+        Payment memory payment = paymentsContract.GetPaymentStruct(paymentId);
+
+        assertEq(payment.PaidAt, CCN_END);
+        assertEq(payment.AmountPaid, amountPaidWei);
     }
 
     function test_MultiplePaymentsReceiveSequentialIDs() public {
@@ -694,9 +1250,17 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        uint256 firstPaymentId = _payDirect(stallId, customer, 1 ether);
+        (uint256 firstPaymentId, uint256 firstAmountWei) = _paySGD(
+            stallId,
+            customer,
+            DEFAULT_PAYMENT_SGD_CENTS
+        );
 
-        uint256 secondPaymentId = _payDirect(stallId, secondCustomer, 2 ether);
+        (uint256 secondPaymentId, uint256 secondAmountWei) = _paySGD(
+            stallId,
+            secondCustomer,
+            SECOND_PAYMENT_SGD_CENTS
+        );
 
         assertEq(firstPaymentId, 1);
         assertEq(secondPaymentId, 2);
@@ -708,176 +1272,94 @@ contract CareLinkPaymentsTest is Test {
         assertEq(paymentIds.length, 2);
         assertEq(paymentIds[0], firstPaymentId);
         assertEq(paymentIds[1], secondPaymentId);
-    }
 
-    // ===============================================================
-    // PAYMENT TIME AND STALL VALIDATION
-    // ===============================================================
+        assertEq(
+            address(paymentsContract).balance,
+            firstAmountWei + secondAmountWei
+        );
 
-    function test_PayToStallRevertsBeforeCCNDayStarts() public {
-        uint256 stallId = _createApprovedStall(stallOwner);
-
-        vm.expectRevert(CareLinkPayments.CCNDayPaymentNotStarted.selector);
-
-        vm.prank(customer);
-
-        paymentsContract.PayToStall{value: DIRECT_PAYMENT_AMOUNT}(stallId);
-    }
-
-    function test_PayToStallRevertsAfterCCNDayEnds() public {
-        uint256 stallId = _createApprovedStall(stallOwner);
-
-        vm.warp(CCN_END + 1);
-
-        vm.expectRevert(CareLinkPayments.CCNDayPaymentEnded.selector);
-
-        vm.prank(customer);
-
-        paymentsContract.PayToStall{value: DIRECT_PAYMENT_AMOUNT}(stallId);
-    }
-
-    function test_PayToStallRevertsForUnknownStall() public {
-        vm.warp(CCN_START);
-
-        vm.expectRevert(StallDoesNotExist.selector);
-
-        vm.prank(customer);
-
-        paymentsContract.PayToStall{value: DIRECT_PAYMENT_AMOUNT}(999);
-    }
-
-    function test_PayToStallRevertsWhenStallIsClosed() public {
-        uint256 stallId = _createApprovedStall(stallOwner);
-
-        vm.prank(stallOwner);
-
-        stallsContract.UpdateMyStallOpenStatus(stallId, StallStatus.Closed);
-
-        vm.warp(CCN_START);
-
-        vm.expectRevert(StallNotOpenForPayment.selector);
-
-        vm.prank(customer);
-
-        paymentsContract.PayToStall{value: DIRECT_PAYMENT_AMOUNT}(stallId);
-    }
-
-    function test_PayToStallRevertsForOldCCNDayStall() public {
-        uint256 oldStallId = _createApprovedStall(stallOwner);
-
-        _createSecondCCNDay();
-
-        vm.warp(SECOND_CCN_START);
-
-        vm.expectRevert(StallNotFromCurrentCCNDay.selector);
-
-        vm.prank(customer);
-
-        paymentsContract.PayToStall{value: DIRECT_PAYMENT_AMOUNT}(oldStallId);
+        assertEq(address(mockPyth).balance, PYTH_UPDATE_FEE * 2);
     }
 
     // ===============================================================
     // PAYMENT CALLER VALIDATION
     // ===============================================================
 
-    function test_PayToStallRevertsForOrganiser() public {
+    function test_PaySGDToStallRevertsForOrganiser() public {
         uint256 stallId = _createApprovedStall(stallOwner);
 
         vm.warp(CCN_START);
+
+        _refreshChainlinkPrice();
+
+        uint256 requiredWei = _calculateRequiredWei(DEFAULT_PAYMENT_SGD_CENTS);
+
+        bytes[] memory priceUpdate = _validPythUpdate();
+        uint256 totalRequiredWei = requiredWei + PYTH_UPDATE_FEE;
 
         vm.expectRevert(OrganiserCannotPay.selector);
 
-        paymentsContract.PayToStall{value: DIRECT_PAYMENT_AMOUNT}(stallId);
+        paymentsContract.PaySGDToStall{value: totalRequiredWei}(
+            stallId,
+            DEFAULT_PAYMENT_SGD_CENTS,
+            priceUpdate
+        );
+
+        // The later revert rolls the Pyth update back too.
+        assertEq(mockPyth.updateCallCount(), 0);
+        assertEq(address(mockPyth).balance, 0);
     }
 
-    function test_PayToStallRevertsForUnregisteredWallet() public {
+    function test_PaySGDToStallRevertsForUnregisteredWallet() public {
         uint256 stallId = _createApprovedStall(stallOwner);
 
         vm.warp(CCN_START);
+
+        _refreshChainlinkPrice();
+
+        uint256 requiredWei = _calculateRequiredWei(DEFAULT_PAYMENT_SGD_CENTS);
+
+        bytes[] memory priceUpdate = _validPythUpdate();
+        uint256 totalRequiredWei = requiredWei + PYTH_UPDATE_FEE;
 
         vm.expectRevert(WalletNotRegistered.selector);
 
         vm.prank(unregisteredWallet);
 
-        paymentsContract.PayToStall{value: DIRECT_PAYMENT_AMOUNT}(stallId);
+        paymentsContract.PaySGDToStall{value: totalRequiredWei}(
+            stallId,
+            DEFAULT_PAYMENT_SGD_CENTS,
+            priceUpdate
+        );
+
+        assertEq(mockPyth.updateCallCount(), 0);
+        assertEq(address(mockPyth).balance, 0);
     }
 
-    function test_PayToStallRevertsForZeroETH() public {
+    function test_PaySGDToStallRevertsWhenOwnerPaysOwnStall() public {
         uint256 stallId = _createApprovedStall(stallOwner);
 
         vm.warp(CCN_START);
 
-        vm.expectRevert(InvalidPaymentAmount.selector);
+        _refreshChainlinkPrice();
 
-        vm.prank(customer);
+        uint256 requiredWei = _calculateRequiredWei(DEFAULT_PAYMENT_SGD_CENTS);
 
-        paymentsContract.PayToStall(stallId);
-    }
-
-    function test_PayToStallRevertsWhenOwnerPaysOwnStall() public {
-        uint256 stallId = _createApprovedStall(stallOwner);
-
-        vm.warp(CCN_START);
+        bytes[] memory priceUpdate = _validPythUpdate();
+        uint256 totalRequiredWei = requiredWei + PYTH_UPDATE_FEE;
 
         vm.expectRevert(CannotPayOwnStall.selector);
 
         vm.prank(stallOwner);
 
-        paymentsContract.PayToStall{value: DIRECT_PAYMENT_AMOUNT}(stallId);
-    }
-
-    // ===============================================================
-    // SGD PAYMENT
-    // ===============================================================
-
-    function test_PaySGDToStallStoresSGDCentsAndExactWei() public {
-        uint256 stallId = _createApprovedStall(stallOwner);
-
-        vm.warp(CCN_START);
-
-        uint256 amountSGDCents = 1250;
-
-        uint256 requiredWei = paymentsContract.CalculateRequiredWeiFromSGDCents(
-            amountSGDCents
+        paymentsContract.PaySGDToStall{value: totalRequiredWei}(
+            stallId,
+            DEFAULT_PAYMENT_SGD_CENTS,
+            priceUpdate
         );
 
-        uint256 paymentId = _paySGD(stallId, customer, amountSGDCents);
-
-        Payment memory payment = paymentsContract.GetPaymentStruct(paymentId);
-
-        assertEq(payment.StallID, stallId);
-        assertEq(payment.CustomerWallet, customer);
-        assertEq(payment.AmountPaid, requiredWei);
-
-        assertEq(payment.AmountPaidSGDCents, amountSGDCents);
-
-        assertEq(uint256(payment.paymentStatus), uint256(PaymentStatus.Paid));
-    }
-
-    function test_PaySGDToStallRevertsForIncorrectWei() public {
-        uint256 stallId = _createApprovedStall(stallOwner);
-
-        vm.warp(CCN_START);
-
-        uint256 amountSGDCents = 1000;
-
-        uint256 requiredWei = paymentsContract.CalculateRequiredWeiFromSGDCents(
-            amountSGDCents
-        );
-
-        uint256 sentWei = requiredWei + 1;
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                CareLinkPayments.IncorrectPaymentAmount.selector,
-                requiredWei,
-                sentWei
-            )
-        );
-
-        vm.prank(customer);
-
-        paymentsContract.PaySGDToStall{value: sentWei}(stallId, amountSGDCents);
+        assertEq(mockPyth.updateCallCount(), 0);
+        assertEq(address(mockPyth).balance, 0);
     }
 
     function test_PaySGDToStallRevertsForZeroSGDAmount() public {
@@ -885,151 +1367,51 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
+        bytes[] memory priceUpdate = _validPythUpdate();
+
         vm.expectRevert(InvalidPaymentAmount.selector);
 
         vm.prank(customer);
 
-        paymentsContract.PaySGDToStall(stallId, 0);
-    }
-
-    // ===============================================================
-    // PRODUCT PAYMENT DETAILS
-    // ===============================================================
-
-    function test_GetRequiredWeiForAvailableProduct() public {
-        uint256 stallId = _createApprovedStall(stallOwner);
-
-        uint256 productId = _createProduct(
+        paymentsContract.PaySGDToStall{value: PYTH_UPDATE_FEE + 1}(
             stallId,
-            stallOwner,
-            ProductStatus.Available
-        );
-
-        (
-            uint256 returnedStallId,
-            uint256 priceSGDCents,
-            uint256 requiredWei
-        ) = paymentsContract.GetRequiredWeiForProduct(productId);
-
-        assertEq(returnedStallId, stallId);
-
-        assertEq(priceSGDCents, PRODUCT_PRICE_SGD_CENTS);
-
-        assertEq(
-            requiredWei,
-            paymentsContract.CalculateRequiredWeiFromSGDCents(
-                PRODUCT_PRICE_SGD_CENTS
-            )
+            0,
+            priceUpdate
         );
     }
 
-    function test_GetRequiredWeiRevertsForUnavailableProduct() public {
+    function test_PaySGDToStallRevertsForIncorrectWei() public {
         uint256 stallId = _createApprovedStall(stallOwner);
-
-        uint256 productId = _createProduct(
-            stallId,
-            stallOwner,
-            ProductStatus.Unavailable
-        );
-
-        vm.expectRevert(CareLinkPayments.ProductNotAvailable.selector);
-
-        paymentsContract.GetRequiredWeiForProduct(productId);
-    }
-
-    function test_GetRequiredWeiRevertsForUnknownProduct() public {
-        vm.expectRevert(ProductDoesNotExist.selector);
-
-        paymentsContract.GetRequiredWeiForProduct(999);
-    }
-
-    // ===============================================================
-    // PAY FOR PRODUCT
-    // ===============================================================
-
-    function test_PayForProductCreatesCorrectPayment() public {
-        uint256 stallId = _createApprovedStall(stallOwner);
-
-        uint256 productId = _createProduct(
-            stallId,
-            stallOwner,
-            ProductStatus.Available
-        );
 
         vm.warp(CCN_START);
 
-        uint256 expectedWei = paymentsContract.CalculateRequiredWeiFromSGDCents(
-            PRODUCT_PRICE_SGD_CENTS
-        );
+        _refreshChainlinkPrice();
 
-        uint256 paymentId = _payForProduct(productId, customer);
+        uint256 requiredWei = _calculateRequiredWei(DEFAULT_PAYMENT_SGD_CENTS);
 
-        Payment memory payment = paymentsContract.GetPaymentStruct(paymentId);
-
-        assertEq(payment.StallID, stallId);
-        assertEq(payment.CustomerWallet, customer);
-        assertEq(payment.StallOwnerWallet, stallOwner);
-        assertEq(payment.AmountPaid, expectedWei);
-
-        assertEq(payment.AmountPaidSGDCents, PRODUCT_PRICE_SGD_CENTS);
-    }
-
-    function test_PayForProductRevertsWhenUnavailable() public {
-        uint256 stallId = _createApprovedStall(stallOwner);
-
-        uint256 productId = _createProduct(
-            stallId,
-            stallOwner,
-            ProductStatus.Unavailable
-        );
-
-        vm.warp(CCN_START);
-
-        vm.expectRevert(CareLinkPayments.ProductNotAvailable.selector);
-
-        vm.prank(customer);
-
-        paymentsContract.PayForProduct(productId);
-    }
-
-    function test_PayForProductRevertsForIncorrectWei() public {
-        uint256 stallId = _createApprovedStall(stallOwner);
-
-        uint256 productId = _createProduct(
-            stallId,
-            stallOwner,
-            ProductStatus.Available
-        );
-
-        vm.warp(CCN_START);
-
-        uint256 requiredWei = paymentsContract.CalculateRequiredWeiFromSGDCents(
-            PRODUCT_PRICE_SGD_CENTS
-        );
-
-        uint256 sentWei = requiredWei + 1;
+        bytes[] memory priceUpdate = _validPythUpdate();
+        uint256 totalRequiredWei = requiredWei + PYTH_UPDATE_FEE;
+        uint256 sentWei = totalRequiredWei + 1;
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                CareLinkPayments.IncorrectPaymentAmount.selector,
-                requiredWei,
+                IncorrectPaymentAmount.selector,
+                totalRequiredWei,
                 sentWei
             )
         );
 
         vm.prank(customer);
 
-        paymentsContract.PayForProduct{value: sentWei}(productId);
-    }
+        paymentsContract.PaySGDToStall{value: sentWei}(
+            stallId,
+            DEFAULT_PAYMENT_SGD_CENTS,
+            priceUpdate
+        );
 
-    function test_PayForProductRevertsForUnknownProduct() public {
-        vm.warp(CCN_START);
-
-        vm.expectRevert(ProductDoesNotExist.selector);
-
-        vm.prank(customer);
-
-        paymentsContract.PayForProduct(999);
+        // Pyth update happened before exact-value checking, but rollback is atomic.
+        assertEq(mockPyth.updateCallCount(), 0);
+        assertEq(address(mockPyth).balance, 0);
     }
 
     // ===============================================================
@@ -1041,10 +1423,10 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        uint256 paymentId = _payDirect(
+        (uint256 paymentId, uint256 amountPaidWei) = _paySGD(
             stallId,
             customer,
-            DIRECT_PAYMENT_AMOUNT
+            DEFAULT_PAYMENT_SGD_CENTS
         );
 
         uint256 customerBalanceBeforeRefund = customer.balance;
@@ -1053,7 +1435,7 @@ contract CareLinkPaymentsTest is Test {
 
         vm.expectEmit(true, true, false, true, address(paymentsContract));
 
-        emit PaymentRefunded(paymentId, customer, DIRECT_PAYMENT_AMOUNT);
+        emit PaymentRefunded(paymentId, customer, amountPaidWei);
 
         vm.prank(stallOwner);
 
@@ -1065,15 +1447,14 @@ contract CareLinkPaymentsTest is Test {
             uint256(payment.paymentStatus),
             uint256(PaymentStatus.Refunded)
         );
-
         assertEq(payment.RefundedAt, CCN_START + 1);
+        assertEq(payment.AmountPaid, amountPaidWei);
+        assertEq(payment.AmountPaidSGDCents, DEFAULT_PAYMENT_SGD_CENTS);
 
-        assertEq(
-            customer.balance,
-            customerBalanceBeforeRefund + DIRECT_PAYMENT_AMOUNT
-        );
-
+        // Only the actual stall payment is refunded; Pyth keeps its fee.
+        assertEq(customer.balance, customerBalanceBeforeRefund + amountPaidWei);
         assertEq(address(paymentsContract).balance, 0);
+        assertEq(address(mockPyth).balance, PYTH_UPDATE_FEE);
 
         assertFalse(paymentsContract.HasUnsettledPaidPayments(stallId));
     }
@@ -1091,10 +1472,10 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        uint256 paymentId = _payDirect(
+        (uint256 paymentId, ) = _paySGD(
             stallId,
             customer,
-            DIRECT_PAYMENT_AMOUNT
+            DEFAULT_PAYMENT_SGD_CENTS
         );
 
         vm.expectRevert(NotPaymentReceiver.selector);
@@ -1109,20 +1490,18 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        uint256 paymentId = _payDirect(
+        (uint256 paymentId, ) = _paySGD(
             stallId,
             customer,
-            DIRECT_PAYMENT_AMOUNT
+            DEFAULT_PAYMENT_SGD_CENTS
         );
 
         vm.prank(stallOwner);
-
         paymentsContract.RefundPayment(paymentId);
 
         vm.expectRevert(PaymentNotPaid.selector);
 
         vm.prank(stallOwner);
-
         paymentsContract.RefundPayment(paymentId);
     }
 
@@ -1141,11 +1520,11 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        vm.prank(address(rejectingCustomer));
-
-        uint256 paymentId = paymentsContract.PayToStall{
-            value: DIRECT_PAYMENT_AMOUNT
-        }(stallId);
+        (uint256 paymentId, uint256 amountPaidWei) = _paySGD(
+            stallId,
+            address(rejectingCustomer),
+            DEFAULT_PAYMENT_SGD_CENTS
+        );
 
         vm.expectRevert(TransferFailed.selector);
 
@@ -1153,20 +1532,11 @@ contract CareLinkPaymentsTest is Test {
 
         paymentsContract.RefundPayment(paymentId);
 
-        /*
-         * The failed refund transaction must roll back:
-         *
-         * - Status remains Paid
-         * - RefundedAt remains zero
-         * - ETH remains in the payment contract
-         */
         Payment memory payment = paymentsContract.GetPaymentStruct(paymentId);
 
         assertEq(uint256(payment.paymentStatus), uint256(PaymentStatus.Paid));
-
         assertEq(payment.RefundedAt, 0);
-
-        assertEq(address(paymentsContract).balance, DIRECT_PAYMENT_AMOUNT);
+        assertEq(address(paymentsContract).balance, amountPaidWei);
     }
 
     // ===============================================================
@@ -1178,9 +1548,17 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        _payDirect(stallId, customer, 1 ether);
+        (, uint256 firstAmountWei) = _paySGD(
+            stallId,
+            customer,
+            DEFAULT_PAYMENT_SGD_CENTS
+        );
 
-        _payDirect(stallId, secondCustomer, 2 ether);
+        (, uint256 secondAmountWei) = _paySGD(
+            stallId,
+            secondCustomer,
+            SECOND_PAYMENT_SGD_CENTS
+        );
 
         vm.prank(stallOwner);
 
@@ -1192,8 +1570,10 @@ contract CareLinkPaymentsTest is Test {
             stallId
         );
 
-        assertEq(ownerView, 3 ether);
-        assertEq(organiserView, 3 ether);
+        uint256 expectedTotal = firstAmountWei + secondAmountWei;
+
+        assertEq(ownerView, expectedTotal);
+        assertEq(organiserView, expectedTotal);
     }
 
     function test_RefundedPaymentsAreExcludedFromWithdrawableBalance() public {
@@ -1201,12 +1581,19 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        uint256 refundedPaymentId = _payDirect(stallId, customer, 1 ether);
+        (uint256 refundedPaymentId, ) = _paySGD(
+            stallId,
+            customer,
+            DEFAULT_PAYMENT_SGD_CENTS
+        );
 
-        _payDirect(stallId, secondCustomer, 2 ether);
+        (, uint256 paidAmountWei) = _paySGD(
+            stallId,
+            secondCustomer,
+            SECOND_PAYMENT_SGD_CENTS
+        );
 
         vm.prank(stallOwner);
-
         paymentsContract.RefundPayment(refundedPaymentId);
 
         vm.prank(stallOwner);
@@ -1214,9 +1601,8 @@ contract CareLinkPaymentsTest is Test {
         uint256 withdrawableBalance = paymentsContract
             .GetStallWithdrawableBalance(stallId);
 
-        assertEq(withdrawableBalance, 2 ether);
-
-        assertEq(address(paymentsContract).balance, 2 ether);
+        assertEq(withdrawableBalance, paidAmountWei);
+        assertEq(address(paymentsContract).balance, paidAmountWei);
     }
 
     function test_GetStallWithdrawableBalanceRevertsForUnknownStall() public {
@@ -1246,14 +1632,15 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        _payDirect(stallId, customer, DIRECT_PAYMENT_AMOUNT);
+        (, uint256 amountPaidWei) = _paySGD(
+            stallId,
+            customer,
+            DEFAULT_PAYMENT_SGD_CENTS
+        );
 
         vm.prank(stallOwner);
 
-        assertEq(
-            paymentsContract.GetMyWithdrawableBalance(),
-            DIRECT_PAYMENT_AMOUNT
-        );
+        assertEq(paymentsContract.GetMyWithdrawableBalance(), amountPaidWei);
     }
 
     // ===============================================================
@@ -1267,16 +1654,15 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        uint256 paymentId = _payDirect(
+        (uint256 paymentId, ) = _paySGD(
             stallId,
             customer,
-            DIRECT_PAYMENT_AMOUNT
+            DEFAULT_PAYMENT_SGD_CENTS
         );
 
         assertTrue(paymentsContract.HasUnsettledPaidPayments(stallId));
 
         vm.prank(stallOwner);
-
         paymentsContract.RefundPayment(paymentId);
 
         assertFalse(paymentsContract.HasUnsettledPaidPayments(stallId));
@@ -1291,10 +1677,10 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        uint256 paymentId = _payDirect(
+        (uint256 paymentId, uint256 amountPaidWei) = _paySGD(
             stallId,
             customer,
-            DIRECT_PAYMENT_AMOUNT
+            DEFAULT_PAYMENT_SGD_CENTS
         );
 
         _allowWithdrawal(stallId);
@@ -1303,7 +1689,7 @@ contract CareLinkPaymentsTest is Test {
 
         vm.expectEmit(true, true, false, true, address(paymentsContract));
 
-        emit WithdrawalCreated(1, stallOwner, DIRECT_PAYMENT_AMOUNT);
+        emit WithdrawalCreated(1, stallOwner, amountPaidWei);
 
         vm.prank(stallOwner);
 
@@ -1321,26 +1707,20 @@ contract CareLinkPaymentsTest is Test {
         assertEq(withdrawal.WithdrawalID, 1);
         assertEq(withdrawal.StallID, stallId);
         assertEq(withdrawal.CCNDayID, 1);
-
         assertEq(withdrawal.StallOwnerWallet, stallOwner);
-
-        assertEq(withdrawal.Amount, DIRECT_PAYMENT_AMOUNT);
-
+        assertEq(withdrawal.Amount, amountPaidWei);
         assertEq(withdrawal.WithdrawnAt, CCN_END + 1);
 
-        assertEq(
-            stallOwner.balance,
-            ownerBalanceBefore + DIRECT_PAYMENT_AMOUNT
-        );
+        assertEq(stallOwner.balance, ownerBalanceBefore + amountPaidWei);
 
+        // Pyth fee is never withdrawable by the stall owner.
         assertEq(address(paymentsContract).balance, 0);
+        assertEq(address(mockPyth).balance, PYTH_UPDATE_FEE);
 
         Stall memory stall = stallsContract.GetStallDetails(stallId);
 
         assertTrue(stall.WithdrawalCompleted);
-
         assertFalse(stallsContract.IsWalletApprovedStallOwner(stallOwner));
-
         assertFalse(paymentsContract.HasUnsettledPaidPayments(stallId));
     }
 
@@ -1349,18 +1729,24 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        uint256 refundedPaymentId = _payDirect(stallId, customer, 1 ether);
+        (uint256 refundedPaymentId, ) = _paySGD(
+            stallId,
+            customer,
+            DEFAULT_PAYMENT_SGD_CENTS
+        );
 
-        uint256 paidPaymentId = _payDirect(stallId, secondCustomer, 2 ether);
+        (uint256 paidPaymentId, uint256 paidAmountWei) = _paySGD(
+            stallId,
+            secondCustomer,
+            SECOND_PAYMENT_SGD_CENTS
+        );
 
         vm.prank(stallOwner);
-
         paymentsContract.RefundPayment(refundedPaymentId);
 
         _allowWithdrawal(stallId);
 
         vm.prank(stallOwner);
-
         paymentsContract.WithdrawStallPayments(stallId);
 
         Payment memory refundedPayment = paymentsContract.GetPaymentStruct(
@@ -1383,7 +1769,8 @@ contract CareLinkPaymentsTest is Test {
 
         Withdrawal memory withdrawal = paymentsContract.GetWithdrawalStruct(1);
 
-        assertEq(withdrawal.Amount, 2 ether);
+        assertEq(withdrawal.Amount, paidAmountWei);
+        assertEq(address(mockPyth).balance, PYTH_UPDATE_FEE * 2);
     }
 
     function test_WithdrawRevertsForUnknownStall() public {
@@ -1411,7 +1798,7 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        _payDirect(stallId, customer, DIRECT_PAYMENT_AMOUNT);
+        _paySGD(stallId, customer, DEFAULT_PAYMENT_SGD_CENTS);
 
         vm.expectRevert(StallNotReadyForWithdrawal.selector);
 
@@ -1438,13 +1825,11 @@ contract CareLinkPaymentsTest is Test {
         _allowWithdrawal(stallId);
 
         vm.prank(stallOwner);
-
         paymentsContract.CompleteStallWithoutWithdrawal(stallId);
 
         vm.expectRevert(NotApprovedStallOwner.selector);
 
         vm.prank(stallOwner);
-
         paymentsContract.WithdrawStallPayments(stallId);
     }
 
@@ -1463,10 +1848,10 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        uint256 paymentId = _payDirect(
+        (uint256 paymentId, uint256 amountPaidWei) = _paySGD(
             stallId,
             customer,
-            DIRECT_PAYMENT_AMOUNT
+            DEFAULT_PAYMENT_SGD_CENTS
         );
 
         _allowWithdrawal(stallId);
@@ -1477,23 +1862,17 @@ contract CareLinkPaymentsTest is Test {
 
         paymentsContract.WithdrawStallPayments(stallId);
 
-        /*
-         * The failed ETH transfer reverts the complete transaction,
-         * including state changes made in CareLinkStalls.
-         */
         Payment memory payment = paymentsContract.GetPaymentStruct(paymentId);
 
         assertEq(uint256(payment.paymentStatus), uint256(PaymentStatus.Paid));
 
         Withdrawal memory withdrawal = paymentsContract.GetWithdrawalStruct(1);
-
         assertEq(withdrawal.WithdrawalID, 0);
 
         Stall memory stall = stallsContract.GetStallDetails(stallId);
-
         assertFalse(stall.WithdrawalCompleted);
 
-        assertEq(address(paymentsContract).balance, DIRECT_PAYMENT_AMOUNT);
+        assertEq(address(paymentsContract).balance, amountPaidWei);
     }
 
     // ===============================================================
@@ -1514,7 +1893,6 @@ contract CareLinkPaymentsTest is Test {
         paymentsContract.CompleteStallWithoutWithdrawal(stallId);
 
         Stall memory stall = stallsContract.GetStallDetails(stallId);
-
         assertTrue(stall.WithdrawalCompleted);
     }
 
@@ -1523,11 +1901,11 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        _payDirect(stallId, customer, DIRECT_PAYMENT_AMOUNT);
+        _paySGD(stallId, customer, DEFAULT_PAYMENT_SGD_CENTS);
 
         _allowWithdrawal(stallId);
 
-        vm.expectRevert(CareLinkPayments.StallHasWithdrawablePayments.selector);
+        vm.expectRevert(StallHasWithdrawablePayments.selector);
 
         vm.prank(stallOwner);
 
@@ -1539,24 +1917,21 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        uint256 paymentId = _payDirect(
+        (uint256 paymentId, ) = _paySGD(
             stallId,
             customer,
-            DIRECT_PAYMENT_AMOUNT
+            DEFAULT_PAYMENT_SGD_CENTS
         );
 
         vm.prank(stallOwner);
-
         paymentsContract.RefundPayment(paymentId);
 
         _allowWithdrawal(stallId);
 
         vm.prank(stallOwner);
-
         paymentsContract.CompleteStallWithoutWithdrawal(stallId);
 
         Stall memory stall = stallsContract.GetStallDetails(stallId);
-
         assertTrue(stall.WithdrawalCompleted);
     }
 
@@ -1596,13 +1971,11 @@ contract CareLinkPaymentsTest is Test {
         _allowWithdrawal(stallId);
 
         vm.prank(stallOwner);
-
         paymentsContract.CompleteStallWithoutWithdrawal(stallId);
 
         vm.expectRevert(NotApprovedStallOwner.selector);
 
         vm.prank(stallOwner);
-
         paymentsContract.CompleteStallWithoutWithdrawal(stallId);
     }
 
@@ -1615,9 +1988,17 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        uint256 firstPaymentId = _payDirect(stallId, customer, 1 ether);
+        (uint256 firstPaymentId, ) = _paySGD(
+            stallId,
+            customer,
+            DEFAULT_PAYMENT_SGD_CENTS
+        );
 
-        uint256 secondPaymentId = _payDirect(stallId, secondCustomer, 2 ether);
+        (uint256 secondPaymentId, ) = _paySGD(
+            stallId,
+            secondCustomer,
+            SECOND_PAYMENT_SGD_CENTS
+        );
 
         uint256[] memory paymentIds = paymentsContract.GetStallPaymentIDs(
             stallId
@@ -1643,9 +2024,11 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        uint256 amountSGDCents = 500;
-
-        uint256 paymentId = _paySGD(stallId, customer, amountSGDCents);
+        (uint256 paymentId, ) = _paySGD(
+            stallId,
+            customer,
+            DEFAULT_PAYMENT_SGD_CENTS
+        );
 
         Payment memory paymentBeforeRefund = paymentsContract.GetPaymentStruct(
             paymentId
@@ -1654,7 +2037,6 @@ contract CareLinkPaymentsTest is Test {
         vm.warp(CCN_START + 1);
 
         vm.prank(stallOwner);
-
         paymentsContract.RefundPayment(paymentId);
 
         vm.prank(customer);
@@ -1664,39 +2046,42 @@ contract CareLinkPaymentsTest is Test {
 
         assertEq(history.length, 2);
 
-        // Customer paid entry: negative from customer perspective.
+        // Customer payment: negative.
         assertEq(history[0].PaymentID, paymentId);
         assertEq(history[0].WithdrawalID, 0);
         assertEq(history[0].StallID, stallId);
-
+        assertEq(history[0].CCNDayID, 1);
+        assertEq(history[0].CustomerWallet, customer);
+        assertEq(history[0].StallOwnerWallet, stallOwner);
         assertEq(history[0].Amount, paymentBeforeRefund.AmountPaid);
-
         assertEq(
             history[0].SignedAmount,
             -int256(paymentBeforeRefund.AmountPaid)
         );
-
-        assertEq(history[0].AmountSGDCents, amountSGDCents);
-
-        assertEq(history[0].SignedAmountSGDCents, -int256(amountSGDCents));
-
+        assertEq(history[0].AmountSGDCents, DEFAULT_PAYMENT_SGD_CENTS);
+        assertEq(
+            history[0].SignedAmountSGDCents,
+            -int256(DEFAULT_PAYMENT_SGD_CENTS)
+        );
+        assertEq(history[0].TransactionAt, CCN_START);
         assertEq(
             uint256(history[0].transactionType),
             uint256(TransactionHistoryType.PaidTransaction)
         );
 
-        // Refund entry: positive from customer perspective.
+        // Customer refund: positive.
         assertEq(history[1].PaymentID, paymentId);
-
+        assertEq(history[1].Amount, paymentBeforeRefund.AmountPaid);
         assertEq(
             history[1].SignedAmount,
             int256(paymentBeforeRefund.AmountPaid)
         );
-
-        assertEq(history[1].SignedAmountSGDCents, int256(amountSGDCents));
-
+        assertEq(history[1].AmountSGDCents, DEFAULT_PAYMENT_SGD_CENTS);
+        assertEq(
+            history[1].SignedAmountSGDCents,
+            int256(DEFAULT_PAYMENT_SGD_CENTS)
+        );
         assertEq(history[1].TransactionAt, CCN_START + 1);
-
         assertEq(
             uint256(history[1].transactionType),
             uint256(TransactionHistoryType.RefundedTransaction)
@@ -1729,16 +2114,15 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        uint256 paymentId = _payDirect(
+        (uint256 paymentId, uint256 amountPaidWei) = _paySGD(
             stallId,
             customer,
-            DIRECT_PAYMENT_AMOUNT
+            DEFAULT_PAYMENT_SGD_CENTS
         );
 
         vm.warp(CCN_START + 1);
 
         vm.prank(stallOwner);
-
         paymentsContract.RefundPayment(paymentId);
 
         vm.prank(stallOwner);
@@ -1748,17 +2132,23 @@ contract CareLinkPaymentsTest is Test {
 
         assertEq(history.length, 2);
 
-        // Payment received is positive for the stall.
-        assertEq(history[0].SignedAmount, int256(DIRECT_PAYMENT_AMOUNT));
-
+        // Payment received: positive from stall perspective.
+        assertEq(history[0].SignedAmount, int256(amountPaidWei));
+        assertEq(
+            history[0].SignedAmountSGDCents,
+            int256(DEFAULT_PAYMENT_SGD_CENTS)
+        );
         assertEq(
             uint256(history[0].transactionType),
             uint256(TransactionHistoryType.PaidTransaction)
         );
 
-        // Refund sent is negative for the stall.
-        assertEq(history[1].SignedAmount, -int256(DIRECT_PAYMENT_AMOUNT));
-
+        // Refund sent: negative from stall perspective.
+        assertEq(history[1].SignedAmount, -int256(amountPaidWei));
+        assertEq(
+            history[1].SignedAmountSGDCents,
+            -int256(DEFAULT_PAYMENT_SGD_CENTS)
+        );
         assertEq(
             uint256(history[1].transactionType),
             uint256(TransactionHistoryType.RefundedTransaction)
@@ -1782,41 +2172,38 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        _payDirect(stallId, customer, DIRECT_PAYMENT_AMOUNT);
+        (, uint256 amountPaidWei) = _paySGD(
+            stallId,
+            customer,
+            DEFAULT_PAYMENT_SGD_CENTS
+        );
 
         _allowWithdrawal(stallId);
 
         vm.prank(stallOwner);
-
         paymentsContract.WithdrawStallPayments(stallId);
 
-        /*
-         * The stall owner's general wallet history contains the
-         * withdrawal as a positive amount because ETH entered
-         * the owner's wallet.
-         */
+        // Wallet history: withdrawal is positive.
         vm.prank(stallOwner);
 
         TransactionHistoryItem[] memory walletHistory = paymentsContract
             .GetMyWalletTransactionHistory();
 
         assertEq(walletHistory.length, 1);
-
+        assertEq(walletHistory[0].PaymentID, 0);
         assertEq(walletHistory[0].WithdrawalID, 1);
-
-        assertEq(walletHistory[0].SignedAmount, int256(DIRECT_PAYMENT_AMOUNT));
-
+        assertEq(walletHistory[0].StallID, stallId);
+        assertEq(walletHistory[0].StallOwnerWallet, stallOwner);
+        assertEq(walletHistory[0].Amount, amountPaidWei);
+        assertEq(walletHistory[0].SignedAmount, int256(amountPaidWei));
+        assertEq(walletHistory[0].AmountSGDCents, 0);
+        assertEq(walletHistory[0].SignedAmountSGDCents, 0);
         assertEq(
             uint256(walletHistory[0].transactionType),
             uint256(TransactionHistoryType.WithdrawalTransaction)
         );
 
-        /*
-         * Stall history contains:
-         *
-         * 1. Payment received: positive
-         * 2. Withdrawal from contract: negative
-         */
+        // Historical stall view by ID still works after completion.
         vm.prank(stallOwner);
 
         TransactionHistoryItem[] memory stallHistory = paymentsContract
@@ -1824,15 +2211,19 @@ contract CareLinkPaymentsTest is Test {
 
         assertEq(stallHistory.length, 2);
 
-        assertEq(stallHistory[0].SignedAmount, int256(DIRECT_PAYMENT_AMOUNT));
-
+        assertEq(stallHistory[0].SignedAmount, int256(amountPaidWei));
+        assertEq(
+            stallHistory[0].SignedAmountSGDCents,
+            int256(DEFAULT_PAYMENT_SGD_CENTS)
+        );
         assertEq(
             uint256(stallHistory[0].transactionType),
             uint256(TransactionHistoryType.PaidTransaction)
         );
 
-        assertEq(stallHistory[1].SignedAmount, -int256(DIRECT_PAYMENT_AMOUNT));
-
+        assertEq(stallHistory[1].SignedAmount, -int256(amountPaidWei));
+        assertEq(stallHistory[1].AmountSGDCents, 0);
+        assertEq(stallHistory[1].SignedAmountSGDCents, 0);
         assertEq(
             uint256(stallHistory[1].transactionType),
             uint256(TransactionHistoryType.WithdrawalTransaction)
@@ -1848,7 +2239,7 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        _payDirect(stallId, customer, DIRECT_PAYMENT_AMOUNT);
+        _paySGD(stallId, customer, DEFAULT_PAYMENT_SGD_CENTS);
 
         TransactionHistoryItem[] memory history = paymentsContract
             .GetStallTransactionHistory(stallId);
@@ -1861,7 +2252,7 @@ contract CareLinkPaymentsTest is Test {
 
         vm.warp(CCN_START);
 
-        _payDirect(stallId, customer, DIRECT_PAYMENT_AMOUNT);
+        _paySGD(stallId, customer, DEFAULT_PAYMENT_SGD_CENTS);
 
         vm.prank(stallOwner);
 

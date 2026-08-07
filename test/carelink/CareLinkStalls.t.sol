@@ -130,15 +130,7 @@ contract CareLinkStallsTest is Test {
 
         _registerStaff(staff, "Staff User", School.Others);
 
-        /*
-         * There is no direct RegisterAsCustomer function.
-         *
-         * We create a Staff profile and remove its whitelist entry.
-         * CareLinkUsers then changes its role to Customer.
-         */
-        _registerStaff(customer, "Customer User", School.Others);
-
-        usersContract.RemoveStaffWallet(customer);
+        _createCustomer(customer, "Customer User", School.Others);
     }
 
     // ===============================================================
@@ -205,6 +197,16 @@ contract CareLinkStallsTest is Test {
         usersContract.RegisterAsStaff(_username, _school);
     }
 
+    function _createCustomer(
+        address _wallet,
+        string memory _username,
+        School _school
+    ) internal {
+        _registerStaff(_wallet, _username, _school);
+
+        usersContract.RemoveStaffWallet(_wallet);
+    }
+
     function _createString(
         uint256 _length
     ) internal pure returns (string memory) {
@@ -217,6 +219,134 @@ contract CareLinkStallsTest is Test {
         return string(characters);
     }
 
+    function _assertStall(
+        Stall memory stall,
+        uint256 expectedStallID,
+        string memory expectedName,
+        string memory expectedDescription,
+        string memory expectedImage,
+        StallType expectedType,
+        address expectedOwner,
+        string memory expectedLocation,
+        School expectedSchool,
+        bool expectedNeedElectricalPort,
+        uint256 expectedCreatedAt,
+        StallStatus expectedStatus,
+        bool expectedAllowedWithdrawal,
+        uint256 expectedCCNDayID,
+        bool expectedWithdrawalCompleted
+    ) internal pure {
+        assertEq(stall.StallID, expectedStallID);
+
+        assertEq(stall.StallName, expectedName);
+
+        assertEq(stall.StallDescription, expectedDescription);
+
+        assertEq(stall.StallImage, expectedImage);
+
+        assertEq(uint256(stall.stallType), uint256(expectedType));
+
+        assertEq(stall.StallOwnerWallet, expectedOwner);
+
+        assertEq(stall.StallLocation, expectedLocation);
+
+        assertEq(uint256(stall.StallSchool), uint256(expectedSchool));
+
+        assertEq(stall.NeedElectricalPort, expectedNeedElectricalPort);
+
+        assertEq(stall.CreatedAt, expectedCreatedAt);
+
+        assertEq(uint256(stall.stallStatus), uint256(expectedStatus));
+
+        assertEq(stall.AllowedWithdrawal, expectedAllowedWithdrawal);
+
+        assertEq(stall.CCNDayID, expectedCCNDayID);
+
+        assertEq(stall.WithdrawalCompleted, expectedWithdrawalCompleted);
+    }
+
+    function _assertProduct(
+        uint256 _productId,
+        uint256 expectedStallID,
+        string memory expectedName,
+        string memory expectedDescription,
+        string memory expectedImage,
+        uint256 expectedPriceSGDCents,
+        ProductStatus expectedStatus
+    ) internal view {
+        (
+            uint256 storedProductID,
+            uint256 storedStallID,
+            string memory storedName,
+            string memory storedDescription,
+            string memory storedImage,
+            uint256 storedPriceSGDCents,
+            ProductStatus storedStatus
+        ) = stallsContract.Products(_productId);
+
+        assertEq(storedProductID, _productId);
+
+        assertEq(storedStallID, expectedStallID);
+
+        assertEq(storedName, expectedName);
+
+        assertEq(storedDescription, expectedDescription);
+
+        assertEq(storedImage, expectedImage);
+
+        assertEq(storedPriceSGDCents, expectedPriceSGDCents);
+
+        assertEq(uint256(storedStatus), uint256(expectedStatus));
+    }
+
+    function _assertDefaultPendingStall(
+        Stall memory stall,
+        uint256 expectedStallID,
+        address expectedOwner
+    ) internal pure {
+        _assertStall(
+            stall,
+            expectedStallID,
+            "CareLink Stall",
+            "A stall created for unit testing",
+            "stall-image",
+            StallType.FoodAndBeverage,
+            expectedOwner,
+            "",
+            School.Others,
+            true,
+            REGISTRATION_START,
+            StallStatus.Pending,
+            false,
+            1,
+            false
+        );
+    }
+
+    function _assertDefaultApprovedStall(
+        Stall memory stall,
+        uint256 expectedStallID,
+        address expectedOwner
+    ) internal pure {
+        _assertStall(
+            stall,
+            expectedStallID,
+            "CareLink Stall",
+            "A stall created for unit testing",
+            "stall-image",
+            StallType.FoodAndBeverage,
+            expectedOwner,
+            "Block 30 Level 2",
+            School.IIT,
+            true,
+            REGISTRATION_START,
+            StallStatus.Open,
+            false,
+            1,
+            false
+        );
+    }
+
     function _createPendingStall(address _owner) internal returns (uint256) {
         vm.warp(REGISTRATION_START);
 
@@ -226,7 +356,7 @@ contract CareLinkStallsTest is Test {
             stallsContract.CreateStall(
                 "CareLink Stall",
                 "A stall created for unit testing",
-                "ipfs://carelink-stall-image",
+                "stall-image",
                 StallType.FoodAndBeverage,
                 true
             );
@@ -277,7 +407,7 @@ contract CareLinkStallsTest is Test {
                 _stallId,
                 "Chicken Rice bruh",
                 "Freshly prepared chicken rice",
-                "ipfs://chicken-rice",
+                "chicken-rice-image",
                 500,
                 ProductStatus.Available
             );
@@ -467,28 +597,23 @@ contract CareLinkStallsTest is Test {
 
         Stall memory stall = stallsContract.GetStallDetails(stallId);
 
-        assertEq(stall.StallID, 1);
-        assertEq(stall.StallName, "William's Food Stall");
-
-        assertEq(stall.StallDescription, "Selling food during CCN Day");
-
-        assertEq(stall.StallImage, "ipfs://stall-image");
-
-        assertEq(uint256(stall.stallType), uint256(StallType.FoodAndBeverage));
-
-        assertEq(stall.StallOwnerWallet, student);
-        assertEq(stall.StallLocation, "");
-
-        assertEq(uint256(stall.StallSchool), uint256(School.Others));
-
-        assertTrue(stall.NeedElectricalPort);
-        assertEq(stall.CreatedAt, REGISTRATION_START);
-
-        assertEq(uint256(stall.stallStatus), uint256(StallStatus.Pending));
-
-        assertFalse(stall.AllowedWithdrawal);
-        assertEq(stall.CCNDayID, 1);
-        assertFalse(stall.WithdrawalCompleted);
+        _assertStall(
+            stall,
+            1,
+            "William's Food Stall",
+            "Selling food during CCN Day",
+            "ipfs://stall-image",
+            StallType.FoodAndBeverage,
+            student,
+            "",
+            School.Others,
+            true,
+            REGISTRATION_START,
+            StallStatus.Pending,
+            false,
+            1,
+            false
+        );
 
         assertTrue(stallsContract.DoesStallExist(stallId));
 
@@ -497,17 +622,31 @@ contract CareLinkStallsTest is Test {
         assertEq(stallsContract.WalletStallID(student), stallId);
 
         assertEq(stallsContract.OwnerStallIDByCCNDay(student, 1), stallId);
+
+        assertEq(stallsContract.GetWalletStallID(student), stallId);
+
+        uint256[] memory ownerStallIds = stallsContract.GetOwnerStallIDs(
+            student
+        );
+
+        assertEq(ownerStallIds.length, 1);
+        assertEq(ownerStallIds[0], stallId);
+
+        assertEq(stallsContract.CCNDayStallIDs(1, 0), stallId);
+
+        assertEq(stallsContract.GetCCNDayStallCount(1), 1);
     }
 
     function test_StaffCanCreateStallRegardlessOfSchool() public {
         uint256 stallId = _createPendingStall(staff);
 
-        assertTrue(stallsContract.DoesStallExist(stallId));
-
         Stall memory stall = stallsContract.GetStallDetails(stallId);
 
-        assertEq(stall.StallOwnerWallet, staff);
-        assertEq(stall.CCNDayID, 1);
+        _assertDefaultPendingStall(stall, stallId, staff);
+
+        assertTrue(stallsContract.HasCreatedStall(staff));
+
+        assertEq(stallsContract.GetWalletStallID(staff), stallId);
     }
 
     function test_CreateMultipleStallsAssignsSequentialIDs() public {
@@ -519,6 +658,66 @@ contract CareLinkStallsTest is Test {
         assertEq(secondStallId, 2);
 
         assertEq(stallsContract.GetCCNDayStallCount(1), 2);
+    }
+
+    function test_CreateStallAcceptsMaximumNameAndDescriptionLengths() public {
+        string memory maximumName = _createString(80);
+
+        string memory maximumDescription = _createString(500);
+
+        uint256 stallId = _createPendingStallWithDetails(
+            student,
+            maximumName,
+            maximumDescription,
+            "ipfs://boundary-image",
+            StallType.Services,
+            false
+        );
+
+        Stall memory stall = stallsContract.GetStallDetails(stallId);
+
+        assertEq(bytes(stall.StallName).length, 80);
+
+        assertEq(bytes(stall.StallDescription).length, 500);
+
+        _assertStall(
+            stall,
+            stallId,
+            maximumName,
+            maximumDescription,
+            "ipfs://boundary-image",
+            StallType.Services,
+            student,
+            "",
+            School.Others,
+            false,
+            REGISTRATION_START,
+            StallStatus.Pending,
+            false,
+            1,
+            false
+        );
+    }
+
+    function test_CreateStallSucceedsAtExactRegistrationEnd() public {
+        vm.warp(REGISTRATION_END);
+
+        vm.prank(student);
+
+        uint256 stallId = stallsContract.CreateStall(
+            "Boundary Stall",
+            "Created exactly when registration closes",
+            "ipfs://boundary",
+            StallType.Services,
+            false
+        );
+
+        assertTrue(stallsContract.DoesStallExist(stallId));
+
+        assertEq(
+            stallsContract.GetStallDetails(stallId).CreatedAt,
+            REGISTRATION_END
+        );
     }
 
     // ===============================================================
@@ -782,21 +981,37 @@ contract CareLinkStallsTest is Test {
     function test_OrganiserCanApprovePendingStall() public {
         uint256 stallId = _createPendingStall(student);
 
-        stallsContract.ApproveStall(stallId, "IIT Concourse", School.IIT);
+        stallsContract.ApproveStall(stallId, "Block 30 Level 2", School.IIT);
 
         Stall memory stall = stallsContract.GetStallDetails(stallId);
 
-        assertEq(stall.StallLocation, "IIT Concourse");
-
-        assertEq(uint256(stall.StallSchool), uint256(School.IIT));
-
-        assertEq(uint256(stall.stallStatus), uint256(StallStatus.Open));
+        _assertDefaultApprovedStall(stall, stallId, student);
 
         assertTrue(stallsContract.IsStallOwner(student));
 
         assertTrue(stallsContract.IsWalletApprovedStallOwner(student));
 
         assertTrue(stallsContract.IsStallOpen(stallId));
+    }
+
+    function test_ApproveStallAcceptsMaximumLocationLength() public {
+        uint256 stallId = _createPendingStall(student);
+
+        string memory maximumLocation = _createString(120);
+
+        stallsContract.ApproveStall(
+            stallId,
+            maximumLocation,
+            School.Engineering
+        );
+
+        Stall memory stall = stallsContract.GetStallDetails(stallId);
+
+        assertEq(bytes(stall.StallLocation).length, 120);
+
+        assertEq(uint256(stall.StallSchool), uint256(School.Engineering));
+
+        assertEq(uint256(stall.stallStatus), uint256(StallStatus.Open));
     }
 
     function test_ApproveStallRevertsForNonOrganiser() public {
@@ -945,6 +1160,35 @@ contract CareLinkStallsTest is Test {
         stallsContract.RejectStall(stallId);
     }
 
+    function test_RejectedStudentCanCreateReplacementStall() public {
+        uint256 rejectedStallId = _createPendingStall(student);
+
+        stallsContract.RejectStall(rejectedStallId);
+
+        assertFalse(stallsContract.IsStallActiveOrUnresolved(rejectedStallId));
+
+        assertTrue(stallsContract.CanWalletCreateStall(student));
+
+        vm.prank(student);
+
+        uint256 replacementStallId = stallsContract.CreateStall(
+            "Replacement Stall",
+            "Second application after rejection",
+            "replacement-stall-image",
+            StallType.Services,
+            false
+        );
+
+        assertEq(replacementStallId, 2);
+
+        assertTrue(stallsContract.DoesStallExist(replacementStallId));
+
+        assertEq(
+            stallsContract.OwnerStallIDByCCNDay(student, 1),
+            replacementStallId
+        );
+    }
+
     // ===============================================================
     // EXPIRED PENDING STALLS
     // ===============================================================
@@ -1021,6 +1265,46 @@ contract CareLinkStallsTest is Test {
         stallsContract.CompleteMyExpiredPendingStall(stallId);
     }
 
+    function test_GetWalletStallIDReturnsExpiredPendingStallUntilCompleted()
+        public
+    {
+        uint256 stallId = _createPendingStall(student);
+
+        vm.warp(CCN_START);
+
+        assertEq(stallsContract.GetWalletActiveOrUnresolvedStallID(student), 0);
+
+        assertEq(stallsContract.GetWalletStallID(student), stallId);
+
+        vm.prank(student);
+
+        Stall memory expiredStall = stallsContract.GetMyStall();
+
+        _assertStall(
+            expiredStall,
+            stallId,
+            "CareLink Stall",
+            "A stall created for unit testing",
+            "stall-image",
+            StallType.FoodAndBeverage,
+            student,
+            "",
+            School.Others,
+            true,
+            REGISTRATION_START,
+            StallStatus.Expired,
+            false,
+            1,
+            false
+        );
+
+        vm.prank(student);
+
+        stallsContract.CompleteMyExpiredPendingStall(stallId);
+
+        assertEq(stallsContract.GetWalletStallID(student), 0);
+    }
+
     // ===============================================================
     // STALL STATUS MANAGEMENT
     // ===============================================================
@@ -1028,7 +1312,7 @@ contract CareLinkStallsTest is Test {
     function test_StallOwnerCanCloseAndReopenStall() public {
         uint256 stallId = _createApprovedStall(student);
 
-        vm.prank(student);
+        vm.startPrank(student);
 
         stallsContract.UpdateMyStallOpenStatus(stallId, StallStatus.Closed);
 
@@ -1038,9 +1322,13 @@ contract CareLinkStallsTest is Test {
 
         assertFalse(stallsContract.IsStallOpen(stallId));
 
-        vm.prank(student);
-
         stallsContract.UpdateMyStallOpenStatus(stallId, StallStatus.Open);
+
+        Stall memory reopenedStall = stallsContract.GetStallDetails(stallId);
+
+        vm.stopPrank();
+
+        _assertDefaultApprovedStall(reopenedStall, stallId, student);
 
         assertTrue(stallsContract.IsStallOpen(stallId));
     }
@@ -1093,6 +1381,16 @@ contract CareLinkStallsTest is Test {
         vm.prank(student);
 
         stallsContract.UpdateMyStallOpenStatus(stallId, StallStatus.Closed);
+    }
+
+    function test_UpdateStatusRevertsWhenStatusIsUnchanged() public {
+        uint256 stallId = _createApprovedStall(student);
+
+        vm.expectRevert(StallStatusUnchanged.selector);
+
+        vm.prank(student);
+
+        stallsContract.UpdateMyStallOpenStatus(stallId, StallStatus.Open);
     }
 
     // ===============================================================
@@ -1241,23 +1539,22 @@ contract CareLinkStallsTest is Test {
 
         assertTrue(stallsContract.DoesProductExist(productId));
 
+        _assertProduct(
+            productId,
+            stallId,
+            "Chicken Rice bruh",
+            "Freshly prepared chicken rice",
+            "chicken-rice-image",
+            500,
+            ProductStatus.Available
+        );
+
         uint256[] memory productIds = stallsContract.GetProductIDsByStallID(
             stallId
         );
 
         assertEq(productIds.length, 1);
         assertEq(productIds[0], productId);
-
-        (
-            uint256 paymentStallId,
-            uint256 priceSGDCents,
-            ProductStatus status
-        ) = stallsContract.GetProductPaymentDetails(productId);
-
-        assertEq(paymentStallId, stallId);
-        assertEq(priceSGDCents, 500);
-
-        assertEq(uint256(status), uint256(ProductStatus.Available));
     }
 
     function test_ClosedStallOwnerCanCreateProduct() public {
@@ -1462,18 +1759,63 @@ contract CareLinkStallsTest is Test {
     function test_CreateProductAcceptsMaximumLengths() public {
         uint256 stallId = _createApprovedStall(student);
 
+        string memory maximumName = _createString(80);
+
+        string memory maximumDescription = _createString(500);
+
+        string memory maximumImage = _createString(300);
+
         vm.prank(student);
 
         uint256 productId = stallsContract.CreateProduct(
             stallId,
-            _createString(80),
-            _createString(500),
-            _createString(300),
+            maximumName,
+            maximumDescription,
+            maximumImage,
             1,
             ProductStatus.Unavailable
         );
 
         assertTrue(stallsContract.DoesProductExist(productId));
+
+        _assertProduct(
+            productId,
+            stallId,
+            maximumName,
+            maximumDescription,
+            maximumImage,
+            1,
+            ProductStatus.Unavailable
+        );
+    }
+
+    function testFuzz_CreateProductStoresPositivePrice(
+        uint96 _rawPrice
+    ) public {
+        uint256 stallId = _createApprovedStall(student);
+
+        uint256 productPrice = bound(uint256(_rawPrice), 1, 1_000_000_000_000);
+
+        vm.prank(student);
+
+        uint256 productId = stallsContract.CreateProduct(
+            stallId,
+            "Fuzz Product",
+            "Product created during fuzz testing",
+            "fuzz-product-image",
+            productPrice,
+            ProductStatus.Available
+        );
+
+        _assertProduct(
+            productId,
+            stallId,
+            "Fuzz Product",
+            "Product created during fuzz testing",
+            "fuzz-product-image",
+            productPrice,
+            ProductStatus.Available
+        );
     }
 
     // ===============================================================
@@ -1491,31 +1833,20 @@ contract CareLinkStallsTest is Test {
             productId,
             "Updated Chicken Rice",
             "Updated product description",
-            "ipfs://updated-product",
+            "updated-product-image",
             650,
             ProductStatus.Unavailable
         );
 
-        (
-            uint256 storedProductId,
-            uint256 storedStallId,
-            string memory storedName,
-            string memory storedDescription,
-            string memory storedImage,
-            uint256 storedPrice,
-            ProductStatus storedStatus
-        ) = stallsContract.Products(productId);
-
-        assertEq(storedProductId, productId);
-        assertEq(storedStallId, stallId);
-        assertEq(storedName, "Updated Chicken Rice");
-
-        assertEq(storedDescription, "Updated product description");
-
-        assertEq(storedImage, "ipfs://updated-product");
-        assertEq(storedPrice, 650);
-
-        assertEq(uint256(storedStatus), uint256(ProductStatus.Unavailable));
+        _assertProduct(
+            productId,
+            stallId,
+            "Updated Chicken Rice",
+            "Updated product description",
+            "updated-product-image",
+            650,
+            ProductStatus.Unavailable
+        );
     }
 
     function test_EditProductCanKeepSameAvailabilityStatus() public {
@@ -1529,24 +1860,20 @@ contract CareLinkStallsTest is Test {
             productId,
             "Renamed Product",
             "Renamed description",
-            "ipfs://renamed",
+            "renamed-product-image",
             700,
             ProductStatus.Available
         );
 
-        (
-            ,
-            ,
-            ,
-            ,
-            ,
-            uint256 storedPrice,
-            ProductStatus storedStatus
-        ) = stallsContract.Products(productId);
-
-        assertEq(storedPrice, 700);
-
-        assertEq(uint256(storedStatus), uint256(ProductStatus.Available));
+        _assertProduct(
+            productId,
+            stallId,
+            "Renamed Product",
+            "Renamed description",
+            "renamed-product-image",
+            700,
+            ProductStatus.Available
+        );
     }
 
     function test_EditProductRevertsForUnknownProduct() public {
@@ -1579,6 +1906,75 @@ contract CareLinkStallsTest is Test {
             "Changed",
             "ipfs://changed",
             100,
+            ProductStatus.Available
+        );
+    }
+
+    function test_EditProductRevertsForZeroPrice() public {
+        uint256 stallId = _createApprovedStall(student);
+
+        uint256 productId = _createProduct(stallId, student);
+
+        vm.expectRevert(ProductPriceMustBeMoreThanZero.selector);
+
+        vm.prank(student);
+
+        stallsContract.EditProduct(
+            productId,
+            "Updated Product",
+            "Updated description",
+            "updated-product-image",
+            0,
+            ProductStatus.Unavailable
+        );
+    }
+
+    function test_EditProductRevertsAfterCCNDayEnds() public {
+        uint256 stallId = _createApprovedStall(student);
+
+        uint256 productId = _createProduct(stallId, student);
+
+        vm.warp(CCN_END + 1);
+
+        vm.expectRevert(CCNDayAlreadyEnded.selector);
+
+        vm.prank(student);
+
+        stallsContract.EditProduct(
+            productId,
+            "Updated Product",
+            "Updated description",
+            "updated-product-image",
+            600,
+            ProductStatus.Available
+        );
+    }
+
+    function test_InvalidProductEditDoesNotModifyProduct() public {
+        uint256 stallId = _createApprovedStall(student);
+
+        uint256 productId = _createProduct(stallId, student);
+
+        vm.expectRevert(ProductPriceMustBeMoreThanZero.selector);
+
+        vm.prank(student);
+
+        stallsContract.EditProduct(
+            productId,
+            "Invalid Changed Name",
+            "Invalid changed description",
+            "invalid-product-image",
+            0,
+            ProductStatus.Unavailable
+        );
+
+        _assertProduct(
+            productId,
+            stallId,
+            "Chicken Rice bruh",
+            "Freshly prepared chicken rice",
+            "chicken-rice-image",
+            500,
             ProductStatus.Available
         );
     }
@@ -1645,16 +2041,43 @@ contract CareLinkStallsTest is Test {
         stallsContract.DeleteProduct(999);
     }
 
-    function test_GetProductDetailsRevertsForUnknownProduct() public {
-        vm.expectRevert(ProductDoesNotExist.selector);
+    function test_DoesProductExistReturnsFalseForZeroAndUnknownProduct()
+        public
+        view
+    {
+        assertFalse(stallsContract.DoesProductExist(0));
 
-        stallsContract.GetProductPaymentDetails(999);
+        assertFalse(stallsContract.DoesProductExist(999));
     }
 
     function test_GetProductIDsRevertsForUnknownStall() public {
         vm.expectRevert(StallDoesNotExist.selector);
 
         stallsContract.GetProductIDsByStallID(999);
+    }
+
+    function test_DeleteProductRevertsForWrongOwner() public {
+        uint256 stallId = _createApprovedStall(student);
+
+        uint256 productId = _createProduct(stallId, student);
+
+        vm.expectRevert(OnlyStallOwner.selector);
+
+        vm.prank(studentTwo);
+
+        stallsContract.DeleteProduct(productId);
+
+        assertTrue(stallsContract.DoesProductExist(productId));
+
+        _assertProduct(
+            productId,
+            stallId,
+            "Chicken Rice bruh",
+            "Freshly prepared chicken rice",
+            "chicken-rice-image",
+            500,
+            ProductStatus.Available
+        );
     }
 
     // ===============================================================
@@ -1665,6 +2088,14 @@ contract CareLinkStallsTest is Test {
         uint256 stallId = _createApprovedStall(student);
 
         uint256 productId = _createProduct(stallId, student);
+
+        vm.expectCall(
+            address(mockPaymentContract),
+            abi.encodeCall(
+                MockCareLinkPaymentsForStalls.HasUnsettledPaidPayments,
+                (stallId)
+            )
+        );
 
         stallsContract.DeleteStall(stallId);
 
@@ -1808,7 +2239,7 @@ contract CareLinkStallsTest is Test {
     }
 
     function test_DirectDeleteByCCNDayRevertsForWrongCaller() public {
-        vm.expectRevert(NotOrganiser.selector);
+        vm.expectRevert(NotCCNDayContract.selector);
 
         vm.prank(outsider);
 
@@ -1838,6 +2269,26 @@ contract CareLinkStallsTest is Test {
         vm.warp(CCN_END + 1);
 
         stallsContract.AllowStallWithdrawal(stallId);
+
+        Stall memory stall = stallsContract.GetStallDetails(stallId);
+
+        _assertStall(
+            stall,
+            stallId,
+            "CareLink Stall",
+            "A stall created for unit testing",
+            "stall-image",
+            StallType.FoodAndBeverage,
+            student,
+            "Block 30 Level 2",
+            School.IIT,
+            true,
+            REGISTRATION_START,
+            StallStatus.Open,
+            true,
+            1,
+            false
+        );
 
         assertTrue(stallsContract.IsStallWithdrawalAllowed(stallId));
     }
@@ -1927,7 +2378,23 @@ contract CareLinkStallsTest is Test {
 
         Stall memory stall = stallsContract.GetStallDetails(stallId);
 
-        assertTrue(stall.WithdrawalCompleted);
+        _assertStall(
+            stall,
+            stallId,
+            "CareLink Stall",
+            "A stall created for unit testing",
+            "stall-image",
+            StallType.FoodAndBeverage,
+            student,
+            "Block 30 Level 2",
+            School.IIT,
+            true,
+            REGISTRATION_START,
+            StallStatus.Open,
+            true,
+            1,
+            true
+        );
 
         assertEq(stallsContract.WalletStallID(student), 0);
 
@@ -1968,8 +2435,24 @@ contract CareLinkStallsTest is Test {
         Stall[] memory history = stallsContract.GetMyStallHistory();
 
         assertEq(history.length, 1);
-        assertEq(history[0].StallID, stallId);
-        assertTrue(history[0].WithdrawalCompleted);
+
+        _assertStall(
+            history[0],
+            stallId,
+            "CareLink Stall",
+            "A stall created for unit testing",
+            "stall-image",
+            StallType.FoodAndBeverage,
+            student,
+            "Block 30 Level 2",
+            School.IIT,
+            true,
+            REGISTRATION_START,
+            StallStatus.Open,
+            true,
+            1,
+            true
+        );
     }
 
     function test_GetMyStallHistoryInitiallyReturnsEmpty() public {

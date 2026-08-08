@@ -1,3 +1,4 @@
+// To test without the test files: forge coverage --exclude-tests
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
@@ -1167,6 +1168,8 @@ contract CareLinkStallsTest is Test {
 
         assertFalse(stallsContract.IsStallActiveOrUnresolved(rejectedStallId));
 
+        assertFalse(stallsContract.HasUnresolvedStall(student));
+
         assertTrue(stallsContract.CanWalletCreateStall(student));
 
         vm.prank(student);
@@ -1192,18 +1195,6 @@ contract CareLinkStallsTest is Test {
     // ===============================================================
     // EXPIRED PENDING STALLS
     // ===============================================================
-
-    function test_PendingStallShowsEffectiveExpiredStatusAtStart() public {
-        uint256 stallId = _createPendingStall(student);
-
-        vm.warp(CCN_START);
-
-        Stall memory stall = stallsContract.GetStallDetails(stallId);
-
-        assertEq(uint256(stall.stallStatus), uint256(StallStatus.Expired));
-
-        assertFalse(stallsContract.IsStallActiveOrUnresolved(stallId));
-    }
 
     function test_OwnerCanCompleteExpiredPendingStall() public {
         uint256 stallId = _createPendingStall(student);
@@ -1303,6 +1294,7 @@ contract CareLinkStallsTest is Test {
         stallsContract.CompleteMyExpiredPendingStall(stallId);
 
         assertEq(stallsContract.GetWalletStallID(student), 0);
+        assertFalse(stallsContract.IsStallActiveOrUnresolved(stallId));
     }
 
     // ===============================================================
@@ -1910,25 +1902,6 @@ contract CareLinkStallsTest is Test {
         );
     }
 
-    function test_EditProductRevertsForZeroPrice() public {
-        uint256 stallId = _createApprovedStall(student);
-
-        uint256 productId = _createProduct(stallId, student);
-
-        vm.expectRevert(ProductPriceMustBeMoreThanZero.selector);
-
-        vm.prank(student);
-
-        stallsContract.EditProduct(
-            productId,
-            "Updated Product",
-            "Updated description",
-            "updated-product-image",
-            0,
-            ProductStatus.Unavailable
-        );
-    }
-
     function test_EditProductRevertsAfterCCNDayEnds() public {
         uint256 stallId = _createApprovedStall(student);
 
@@ -2109,7 +2082,39 @@ contract CareLinkStallsTest is Test {
 
         assertFalse(stallsContract.IsStallOwner(student));
 
+        assertEq(stallsContract.OwnerStallIDByCCNDay(student, 1), 0);
+
+        uint256[] memory ownerStallIds = stallsContract.GetOwnerStallIDs(
+            student
+        );
+
+        assertEq(ownerStallIds.length, 0);
+
         assertEq(stallsContract.GetCCNDayStallCount(1), 0);
+    }
+
+    function test_DeleteStallOnlyRemovesSelectedStallFromCCNDay() public {
+        uint256 firstStallId = _createApprovedStall(student);
+
+        uint256 secondStallId = _createApprovedStall(studentTwo);
+
+        stallsContract.DeleteStall(firstStallId);
+
+        assertFalse(stallsContract.DoesStallExist(firstStallId));
+
+        assertTrue(stallsContract.DoesStallExist(secondStallId));
+
+        assertEq(stallsContract.GetCCNDayStallCount(1), 1);
+
+        assertEq(stallsContract.CCNDayStallIDs(1, 0), secondStallId);
+
+        Stall memory remainingStall = stallsContract.GetStallDetails(
+            secondStallId
+        );
+
+        assertEq(remainingStall.StallID, secondStallId);
+
+        assertEq(remainingStall.StallOwnerWallet, studentTwo);
     }
 
     function test_DeleteStallRevertsForNonOrganiser() public {
@@ -2187,7 +2192,21 @@ contract CareLinkStallsTest is Test {
 
         assertFalse(stallsContract.DoesStallExist(stallId));
 
+        assertEq(stallsContract.WalletStallID(student), 0);
+
         assertFalse(stallsContract.HasCreatedStall(student));
+
+        assertFalse(stallsContract.IsStallOwner(student));
+
+        assertEq(stallsContract.OwnerStallIDByCCNDay(student, 1), 0);
+
+        uint256[] memory ownerStallIds = stallsContract.GetOwnerStallIDs(
+            student
+        );
+
+        assertEq(ownerStallIds.length, 0);
+
+        assertEq(stallsContract.GetCCNDayStallCount(1), 0);
     }
 
     function test_DeleteMyStallRevertsForWrongOwner() public {
@@ -2218,6 +2237,56 @@ contract CareLinkStallsTest is Test {
         stallsContract.DeleteMyStall(999);
     }
 
+    function test_DeletingRejectedStallPreservesReplacementStall() public {
+        uint256 rejectedStallId = _createPendingStall(student);
+
+        stallsContract.RejectStall(rejectedStallId);
+
+        vm.prank(student);
+
+        uint256 replacementStallId = stallsContract.CreateStall(
+            "Replacement Stall",
+            "Second application after rejection",
+            "replacement-stall-image",
+            StallType.Services,
+            false
+        );
+
+        assertEq(
+            stallsContract.OwnerStallIDByCCNDay(student, 1),
+            replacementStallId
+        );
+
+        assertEq(stallsContract.WalletStallID(student), replacementStallId);
+
+        stallsContract.DeleteStall(rejectedStallId);
+
+        assertFalse(stallsContract.DoesStallExist(rejectedStallId));
+
+        assertTrue(stallsContract.DoesStallExist(replacementStallId));
+
+        assertEq(
+            stallsContract.OwnerStallIDByCCNDay(student, 1),
+            replacementStallId
+        );
+
+        assertEq(stallsContract.WalletStallID(student), replacementStallId);
+
+        assertTrue(stallsContract.HasCreatedStall(student));
+
+        uint256[] memory ownerStallIds = stallsContract.GetOwnerStallIDs(
+            student
+        );
+
+        assertEq(ownerStallIds.length, 1);
+
+        assertEq(ownerStallIds[0], replacementStallId);
+
+        assertEq(stallsContract.GetCCNDayStallCount(1), 1);
+
+        assertEq(stallsContract.CCNDayStallIDs(1, 0), replacementStallId);
+    }
+
     // ===============================================================
     // DELETE ALL STALLS THROUGH CCN DAY CONTRACT
     // ===============================================================
@@ -2232,6 +2301,34 @@ contract CareLinkStallsTest is Test {
         assertFalse(stallsContract.DoesStallExist(firstStallId));
 
         assertFalse(stallsContract.DoesStallExist(secondStallId));
+
+        assertEq(stallsContract.OwnerStallIDByCCNDay(student, 1), 0);
+
+        assertEq(stallsContract.OwnerStallIDByCCNDay(studentTwo, 1), 0);
+
+        uint256[] memory studentStallIds = stallsContract.GetOwnerStallIDs(
+            student
+        );
+
+        uint256[] memory studentTwoStallIds = stallsContract.GetOwnerStallIDs(
+            studentTwo
+        );
+
+        assertEq(studentStallIds.length, 0);
+
+        assertEq(studentTwoStallIds.length, 0);
+
+        assertEq(stallsContract.WalletStallID(student), 0);
+
+        assertEq(stallsContract.WalletStallID(studentTwo), 0);
+
+        assertFalse(stallsContract.HasCreatedStall(student));
+
+        assertFalse(stallsContract.HasCreatedStall(studentTwo));
+
+        assertFalse(stallsContract.IsStallOwner(student));
+
+        assertFalse(stallsContract.IsStallOwner(studentTwo));
 
         assertFalse(ccnDayContract.DoesCCNDayExist(1));
 

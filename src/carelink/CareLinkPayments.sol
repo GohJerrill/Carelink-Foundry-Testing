@@ -73,8 +73,8 @@ contract CareLinkPayments {
     bytes32 public constant USD_SGD_PRICE_FEED_ID =
         0x396a969a9c1480fa15ed50bc59149e2c0075a72fe8f458ed941ddec48bdb4918;
 
-    // Pyth USD/SGD must be no older than 120 second (2mins).
-    uint256 public constant PYTH_PRICE_MAX_AGE = 120 seconds;
+    // Pyth USD/SGD must be no older than 4 days.
+    uint256 public constant PYTH_PRICE_MAX_AGE = 4 days;
 
     // If the Chainlink ETH/USD oracle price is older than this,
     uint256 public constant ORACLE_STALE_TIME_LIMIT = 2 hours;

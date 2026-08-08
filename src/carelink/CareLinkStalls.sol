@@ -427,8 +427,15 @@ contract CareLinkStalls {
         );
     }
 
-    function DeleteStallData(uint256 _stallId) internal {
+    function DeleteStallData(
+        uint256 _stallId,
+        bool _removeFromCCNDayList
+    ) internal {
         address stallOwnerWallet = Stalls[_stallId].StallOwnerWallet;
+
+        uint256 ccnDayId = Stalls[_stallId].CCNDayID;
+
+        bool wasTrackedStall = WalletStallID[stallOwnerWallet] == _stallId;
 
         uint256[] memory productIds = StallProductIDs[_stallId];
 
@@ -438,13 +445,67 @@ contract CareLinkStalls {
 
         delete StallProductIDs[_stallId];
 
-        if (WalletStallID[stallOwnerWallet] == _stallId) {
-            delete WalletStallID[stallOwnerWallet];
-            HasCreatedStall[stallOwnerWallet] = false;
-            IsStallOwner[stallOwnerWallet] = false;
+        if (OwnerStallIDByCCNDay[stallOwnerWallet][ccnDayId] == _stallId) {
+            delete OwnerStallIDByCCNDay[stallOwnerWallet][ccnDayId];
+        }
+
+        RemoveStallIDFromOwner(stallOwnerWallet, _stallId);
+
+        if (_removeFromCCNDayList) {
+            RemoveStallIDFromCCNDay(ccnDayId, _stallId);
         }
 
         delete Stalls[_stallId];
+
+        if (wasTrackedStall) {
+            uint256 replacementStallId = GetWalletActiveOrUnresolvedStallID(
+                stallOwnerWallet
+            );
+
+            if (replacementStallId == 0) {
+                delete WalletStallID[stallOwnerWallet];
+
+                HasCreatedStall[stallOwnerWallet] = false;
+            } else {
+                WalletStallID[stallOwnerWallet] = replacementStallId;
+
+                HasCreatedStall[stallOwnerWallet] = true;
+            }
+        }
+
+        IsStallOwner[stallOwnerWallet] = IsWalletApprovedStallOwner(
+            stallOwnerWallet
+        );
+    }
+
+    function RemoveStallIDFromOwner(
+        address _stallOwnerWallet,
+        uint256 _stallId
+    ) internal {
+        uint256[] storage stallIds = OwnerStallIDs[_stallOwnerWallet];
+
+        for (uint256 i = 0; i < stallIds.length; i++) {
+            if (stallIds[i] == _stallId) {
+                stallIds[i] = stallIds[stallIds.length - 1];
+                stallIds.pop();
+                break;
+            }
+        }
+    }
+
+    function RemoveStallIDFromCCNDay(
+        uint256 _ccnDayId,
+        uint256 _stallId
+    ) internal {
+        uint256[] storage stallIds = CCNDayStallIDs[_ccnDayId];
+
+        for (uint256 i = 0; i < stallIds.length; i++) {
+            if (stallIds[i] == _stallId) {
+                stallIds[i] = stallIds[stallIds.length - 1];
+                stallIds.pop();
+                break;
+            }
+        }
     }
 
     function HasUnsettledPaidPayments(
@@ -1022,7 +1083,7 @@ contract CareLinkStalls {
 
         ValidateStallCanBeDeleted(_stallId);
 
-        DeleteStallData(_stallId);
+        DeleteStallData(_stallId, true);
 
         emit StallDeleted(_stallId, msg.sender);
     }
@@ -1049,7 +1110,7 @@ contract CareLinkStalls {
 
         ValidateStallCanBeDeleted(_stallId);
 
-        DeleteStallData(_stallId);
+        DeleteStallData(_stallId, true);
 
         emit StallDeleted(_stallId, msg.sender);
     }
@@ -1064,7 +1125,9 @@ contract CareLinkStalls {
 
             if (DoesStallExist(stallId)) {
                 ValidateStallCanBeDeleted(stallId);
-                DeleteStallData(stallId);
+
+                DeleteStallData(stallId, false);
+
                 emit StallDeleted(stallId, msg.sender);
             }
         }

@@ -1,3 +1,4 @@
+// To test without the test files: forge coverage --exclude-tests
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
@@ -754,17 +755,31 @@ contract CareLinkPaymentsTest is Test {
         paymentsContract.GetLatestUSDSGDPrice8Decimals();
     }
 
-    function test_GetLatestUSDSGDPriceRejectsPriceOlderThan120Seconds() public {
+    function test_GetLatestUSDSGDPriceRejectsPriceOlderThan4Days() public {
         mockPyth.SetPrice(
             PYTH_USD_SGD_PRICE,
             PYTH_CONFIDENCE,
             PYTH_USD_SGD_EXPO,
-            BASE_TIME - 121
+            BASE_TIME - 4 days - 1
         );
 
         vm.expectRevert(MockPyth.MockPythPriceTooOld.selector);
 
         paymentsContract.GetLatestUSDSGDPrice8Decimals();
+    }
+
+    function test_GetLatestUSDSGDPriceAcceptsExactFourDayLimit() public {
+        mockPyth.SetPrice(
+            PYTH_USD_SGD_PRICE,
+            PYTH_CONFIDENCE,
+            PYTH_USD_SGD_EXPO,
+            BASE_TIME - 4 days
+        );
+
+        assertEq(
+            paymentsContract.GetLatestUSDSGDPrice8Decimals(),
+            USD_SGD_PRICE_8_DECIMALS
+        );
     }
 
     function test_ConvertPythPriceWithMinus5Exponent() public view {
@@ -860,22 +875,28 @@ contract CareLinkPaymentsTest is Test {
     // SGD TO WEI CONVERSION
     // ===============================================================
 
-    function test_CalculateRequiredWeiUsesBothOraclePrices() public view {
-        uint256 amountSGDCents = 1000;
-
-        uint256 ethSgdPrice = (uint256(ETH_USD_PRICE) *
-            USD_SGD_PRICE_8_DECIMALS) / 1e8;
-
-        uint256 expectedWei = (amountSGDCents * 1e8 * 1 ether) /
-            (ethSgdPrice * 100);
-
+    function test_CalculateRequiredWeiReturnsExpectedKnownConversion()
+        public
+        view
+    {
+        /*
+         * ETH/USD = 3000
+         * USD/SGD = 1.25
+         *
+         * Therefore:
+         * 1 ETH = 3750 SGD
+         *
+         * 1500 cents = 15 SGD
+         *
+         * 15 / 3750 = 0.004 ETH
+         *            = 4,000,000,000,000,000 Wei
+         */
         uint256 actualWei = paymentsContract.CalculateRequiredWeiFromSGDCents(
-            amountSGDCents,
+            1500,
             USD_SGD_PRICE_8_DECIMALS
         );
 
-        assertEq(actualWei, expectedWei);
-        assertGt(actualWei, 0);
+        assertEq(actualWei, 4_000_000_000_000_000);
     }
 
     function test_CalculateRequiredWeiRevertsForZeroSGDCents() public {

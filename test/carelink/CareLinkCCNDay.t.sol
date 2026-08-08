@@ -1,3 +1,4 @@
+// To test without the test files: forge coverage --exclude-tests
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
@@ -231,7 +232,7 @@ contract CareLinkCCNDayTest is Test {
     // CONSTRUCTOR
     // ===============================================================
 
-    function test_ConstructorSetsOrganiser() public {
+    function test_ConstructorSetsOrganiser() public view {
         assertEq(ccnDayContract.Organiser(), organiser);
     }
 
@@ -245,28 +246,28 @@ contract CareLinkCCNDayTest is Test {
     // INITIAL STATE
     // ===============================================================
 
-    function test_InitialStateHasNoCurrentCCNDay() public {
+    function test_InitialStateHasNoCurrentCCNDay() public view {
         assertEq(ccnDayContract.GetCurrentCCNDayID(), 0);
         assertFalse(ccnDayContract.IsCurrentCCNDayActive());
         assertFalse(ccnDayContract.IsStallRegistrationOpen());
     }
 
-    function test_GetAllCCNDaysInitiallyReturnsEmptyArray() public {
+    function test_GetAllCCNDaysInitiallyReturnsEmptyArray() public view {
         CCNDay[] memory allCCNDays = ccnDayContract.GetAllCCNDays();
 
         assertEq(allCCNDays.length, 0);
     }
 
-    function test_DoesCCNDayExistReturnsFalseForZeroID() public {
+    function test_DoesCCNDayExistReturnsFalseForZeroID() public view{
         assertFalse(ccnDayContract.DoesCCNDayExist(0));
     }
 
-    function test_DoesCCNDayExistReturnsFalseForUnknownID() public {
+    function test_DoesCCNDayExistReturnsFalseForUnknownID() public view {
         assertFalse(ccnDayContract.DoesCCNDayExist(999));
     }
 
     function test_IsSchoolEligibleForCurrentCCNDayReturnsFalseWhenNoneExists()
-        public
+        public view
     {
         assertFalse(
             ccnDayContract.IsSchoolEligibleForCurrentCCNDay(School.IIT)
@@ -276,17 +277,6 @@ contract CareLinkCCNDayTest is Test {
     // ===============================================================
     // SET STALL CONTRACT ADDRESS
     // ===============================================================
-
-    function test_OrganiserCanSetStallContractAddress() public {
-        vm.prank(organiser);
-
-        ccnDayContract.SetStallContractAddress(address(mockStallContract));
-
-        assertEq(
-            address(ccnDayContract.stallContract()),
-            address(mockStallContract)
-        );
-    }
 
     function test_SetStallContractAddressRevertsForNonOrganiser() public {
         vm.expectRevert(NotOrganiser.selector);

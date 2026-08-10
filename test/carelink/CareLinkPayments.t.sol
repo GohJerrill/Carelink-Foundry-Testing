@@ -392,9 +392,9 @@ contract CareLinkPaymentsTest is Test {
             School.Business
         );
 
-        _registerStudent(customer, "Customer", School.IIT);
+        _registerCustomer(customer, "Customer");
 
-        _registerStudent(secondCustomer, "Second Customer", School.Business);
+        _registerCustomer(secondCustomer, "Second Customer");
     }
 
     // ===============================================================
@@ -447,6 +447,15 @@ contract CareLinkPaymentsTest is Test {
         vm.prank(_wallet);
 
         usersContract.RegisterAsStudent(_username, _school);
+    }
+
+    function _registerCustomer(
+        address _wallet,
+        string memory _username
+    ) internal {
+        vm.prank(_wallet);
+
+        usersContract.RegisterAsCustomer(_username);
     }
 
     function _createApprovedStall(address _owner) internal returns (uint256) {
@@ -1529,11 +1538,7 @@ contract CareLinkPaymentsTest is Test {
     function test_RefundTransferFailureRollsBackState() public {
         RejectEtherReceiver rejectingCustomer = new RejectEtherReceiver();
 
-        _registerStudent(
-            address(rejectingCustomer),
-            "Rejecting Customer",
-            School.IIT
-        );
+        _registerCustomer(address(rejectingCustomer), "Rejecting Customer");
 
         vm.deal(address(rejectingCustomer), 10 ether);
 

@@ -16,7 +16,7 @@ contract CareLinkUsersTest is Test {
     address internal staffTwo;
     address internal staffThree;
     address internal unregisteredUser;
-    address internal outsider;
+    address internal customer;
 
     uint256 internal constant TEST_TIMESTAMP = 1_800_000_000;
 
@@ -30,7 +30,7 @@ contract CareLinkUsersTest is Test {
         staffTwo = makeAddr("staffTwo");
         staffThree = makeAddr("staffThree");
         unregisteredUser = makeAddr("unregisteredUser");
-        outsider = makeAddr("outsider");
+        customer = makeAddr("customer");
 
         usersContract = new CareLinkUsers();
     }
@@ -61,6 +61,14 @@ contract CareLinkUsersTest is Test {
 
         vm.prank(wallet);
         usersContract.RegisterAsStaff(username, school);
+    }
+
+    function _registerCustomer(
+        address wallet,
+        string memory username
+    ) internal {
+        vm.prank(wallet);
+        usersContract.RegisterAsCustomer(username);
     }
 
     function _createString(
@@ -213,7 +221,7 @@ contract CareLinkUsersTest is Test {
     function test_AddStaffWallet_RevertsForNonOrganiser() public {
         vm.expectRevert(NotOrganiser.selector);
 
-        vm.prank(outsider);
+        vm.prank(customer);
         usersContract.addStaffWallet(staff);
     }
 
@@ -276,7 +284,7 @@ contract CareLinkUsersTest is Test {
 
         vm.expectRevert(NotOrganiser.selector);
 
-        vm.prank(outsider);
+        vm.prank(customer);
         usersContract.RemoveStaffWallet(staff);
     }
 
@@ -451,6 +459,96 @@ contract CareLinkUsersTest is Test {
     }
 
     // ===============================================================
+    // CUSTOMER REGISTRATION
+    // ===============================================================
+
+    function test_RegisterAsCustomer_RegistersValidCustomer() public {
+        _registerCustomer(customer, "CareLink Customer");
+
+        UserProfile memory profile = usersContract.GetUserProfileByWallet(
+            customer
+        );
+
+        _assertCustomerProfile(
+            profile,
+            customer,
+            "CareLink Customer",
+            School.Others
+        );
+
+        assertTrue(usersContract.IsWalletRegistered(customer));
+        assertFalse(usersContract.StaffWhiteList(customer));
+    }
+
+    function test_RegisterAsCustomer_AcceptsMaximumUsernameLength() public {
+        string memory maximumUsername = _createString(120);
+
+        _registerCustomer(customer, maximumUsername);
+
+        UserProfile memory profile = usersContract.GetUserProfileByWallet(
+            customer
+        );
+
+        assertEq(bytes(profile.Username).length, 120);
+
+        _assertCustomerProfile(
+            profile,
+            customer,
+            maximumUsername,
+            School.Others
+        );
+    }
+
+    function test_RegisterAsCustomer_RevertsForOrganiser() public {
+        vm.expectRevert(OrganiserCannotRegister.selector);
+
+        usersContract.RegisterAsCustomer("Organiser Customer");
+    }
+
+    function test_RegisterAsCustomer_RevertsForWhitelistedStaff() public {
+        usersContract.addStaffWallet(customer);
+
+        vm.expectRevert(WhitelistedStaffMustRegisterAsStaff.selector);
+
+        vm.prank(customer);
+        usersContract.RegisterAsCustomer("Whitelisted Customer");
+    }
+
+    function test_RegisterAsCustomer_RevertsForEmptyUsername() public {
+        vm.expectRevert(EmptyUsername.selector);
+
+        vm.prank(customer);
+        usersContract.RegisterAsCustomer("");
+    }
+
+    function test_RegisterAsCustomer_RevertsForLongUsername() public {
+        string memory longUsername = _createString(121);
+
+        vm.expectRevert(UsernameTooLong.selector);
+
+        vm.prank(customer);
+        usersContract.RegisterAsCustomer(longUsername);
+    }
+
+    function test_RegisterAsCustomer_RevertsWhenAlreadyRegistered() public {
+        _registerCustomer(customer, "First Customer");
+
+        vm.expectRevert(AlreadyRegistered.selector);
+
+        vm.prank(customer);
+        usersContract.RegisterAsCustomer("Second Customer");
+    }
+
+    function test_RegisterAsCustomer_CannotLaterRegisterAsStudent() public {
+        _registerCustomer(customer, "Customer User");
+
+        vm.expectRevert(AlreadyRegistered.selector);
+
+        vm.prank(customer);
+        usersContract.RegisterAsStudent("Trying To Become Student", School.IIT);
+    }
+
+    // ===============================================================
     // STAFF REGISTRATION
     // ===============================================================
 
@@ -560,34 +658,34 @@ contract CareLinkUsersTest is Test {
     function test_UpgradeMyProfileToStaff_UpgradesCustomerAndPreservesProfile()
         public
     {
-        _createCustomer(staff, "Customer User", School.Engineering);
+        _registerCustomer(customer, "Customer User");
 
         UserProfile memory customerProfile = usersContract
-            .GetUserProfileByWallet(staff);
+            .GetUserProfileByWallet(customer);
 
         _assertCustomerProfile(
             customerProfile,
-            staff,
+            customer,
             "Customer User",
-            School.Engineering
+            School.Others
         );
 
-        usersContract.addStaffWallet(staff);
+        usersContract.addStaffWallet(customer);
 
-        vm.prank(staff);
+        vm.prank(customer);
         usersContract.UpgradeMyProfileToStaff(School.Business);
 
         UserProfile memory upgradedProfile = usersContract
-            .GetUserProfileByWallet(staff);
+            .GetUserProfileByWallet(customer);
 
         _assertStaffProfile(
             upgradedProfile,
-            staff,
+            customer,
             "Customer User",
             School.Business
         );
 
-        assertTrue(usersContract.StaffWhiteList(staff));
+        assertTrue(usersContract.StaffWhiteList(customer));
     }
 
     function test_UpgradeMyProfileToStaff_RevertsForOrganiser() public {
@@ -855,9 +953,9 @@ contract CareLinkUsersTest is Test {
     }
 
     function test_AuthenticateMyWallet_ReturnsRegisteredCustomerData() public {
-        _createCustomer(staff, "Customer User", School.Engineering);
+        _registerCustomer(customer, "Customer User");
 
-        vm.prank(staff);
+        vm.prank(customer);
 
         (
             address walletAddress,
@@ -871,14 +969,14 @@ contract CareLinkUsersTest is Test {
             uint256 registeredAt
         ) = usersContract.AuthenticateMyWallet();
 
-        assertEq(walletAddress, staff);
+        assertEq(walletAddress, customer);
         assertEq(username, "Customer User");
         assertTrue(isAuthenticated);
         assertFalse(isOrganiser);
         assertTrue(isRegisteredUser);
         assertFalse(isStaffWhitelisted);
         assertEq(uint256(usertype), uint256(UserType.Customer));
-        assertEq(uint256(school), uint256(School.Engineering));
+        assertEq(uint256(school), uint256(School.Others));
         assertEq(registeredAt, TEST_TIMESTAMP);
     }
 
@@ -918,16 +1016,16 @@ contract CareLinkUsersTest is Test {
     }
 
     function test_GetMyProfile_ReturnsCustomerProfile() public {
-        _createCustomer(staff, "Customer Profile", School.Business);
+        _registerCustomer(customer, "Customer Profile");
 
-        vm.prank(staff);
+        vm.prank(customer);
         UserProfile memory profile = usersContract.GetMyProfile();
 
         _assertCustomerProfile(
             profile,
-            staff,
+            customer,
             "Customer Profile",
-            School.Business
+            School.Others
         );
     }
 
@@ -1002,20 +1100,20 @@ contract CareLinkUsersTest is Test {
     }
 
     function test_HelperGetters_ReturnCorrectCustomerInformation() public {
-        _createCustomer(staff, "Customer User", School.Science);
+        _registerCustomer(customer, "Customer User");
 
-        assertTrue(usersContract.IsWalletRegistered(staff));
+        assertTrue(usersContract.IsWalletRegistered(customer));
 
-        assertFalse(usersContract.IsWalletStaffWhitelisted(staff));
+        assertFalse(usersContract.IsWalletStaffWhitelisted(customer));
 
         assertEq(
-            uint256(usersContract.GetWalletUserType(staff)),
+            uint256(usersContract.GetWalletUserType(customer)),
             uint256(UserType.Customer)
         );
 
         assertEq(
-            uint256(usersContract.GetWalletSchool(staff)),
-            uint256(School.Science)
+            uint256(usersContract.GetWalletSchool(customer)),
+            uint256(School.Others)
         );
     }
 

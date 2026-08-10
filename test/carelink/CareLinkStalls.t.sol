@@ -131,7 +131,7 @@ contract CareLinkStallsTest is Test {
 
         _registerStaff(staff, "Staff User", School.Others);
 
-        _createCustomer(customer, "Customer User", School.Others);
+        _registerCustomer(customer, "Customer User");
     }
 
     // ===============================================================
@@ -198,14 +198,13 @@ contract CareLinkStallsTest is Test {
         usersContract.RegisterAsStaff(_username, _school);
     }
 
-    function _createCustomer(
+    function _registerCustomer(
         address _wallet,
-        string memory _username,
-        School _school
+        string memory _username
     ) internal {
-        _registerStaff(_wallet, _username, _school);
+        vm.prank(_wallet);
 
-        usersContract.RemoveStaffWallet(_wallet);
+        usersContract.RegisterAsCustomer(_username);
     }
 
     function _createString(

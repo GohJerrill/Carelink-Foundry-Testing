@@ -136,6 +136,29 @@ contract CareLinkUsers {
         });
     }
 
+    function RegisterAsCustomer(
+        string memory _username
+    ) public onlyUnregisteredUser {
+        if (msg.sender == Organiser) {
+            revert OrganiserCannotRegister();
+        }
+
+        if (StaffWhiteList[msg.sender]) {
+            revert WhitelistedStaffMustRegisterAsStaff();
+        }
+
+        ValidateUsername(_username);
+
+        Users[msg.sender] = UserProfile({
+            WalletAddress: msg.sender,
+            Username: _username,
+            usertype: UserType.Customer,
+            school: School.Others,
+            IsRegistered: true,
+            RegisteredAt: block.timestamp
+        });
+    }
+
     function RegisterAsStaff(
         string memory _username,
         School _school
